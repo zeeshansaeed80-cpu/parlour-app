@@ -491,3 +491,27 @@ body.has-tabbar #toast-root { bottom: calc(84px + env(safe-area-inset-bottom)); 
   .day-row { font-size: .82rem; padding: 8px 10px; gap: 4px; }
   .tab { font-size: .7rem; }
 }
+
+/* ===================== Stage 4 ===================== */
+/* tablet: list and details side by side */
+.split { display: grid; grid-template-columns: minmax(300px, 400px) 1fr; gap: 20px; align-items: start; }
+.split-list { min-width: 0; }
+.split-detail {
+  min-width: 0; position: sticky; top: 12px; max-height: calc(100vh - 110px); overflow: auto;
+  background: var(--surface-2); border-radius: 18px; padding: 0 16px 16px;
+}
+.split-detail .topbar.sub { background: transparent; position: static; }
+.split-detail .profile { max-width: none; }
+.person.selected { border-color: var(--plum); box-shadow: inset 0 0 0 1px var(--plum); background: var(--plum-soft); }
+.pane-empty { margin-top: 16px; background: var(--surface); }
+
+/* getting started */
+.getting-started { margin-bottom: 16px; border-color: var(--plum); }
+.getting-started ul { list-style: none; margin: 0; padding: 0; }
+.gs-step {
+  width: 100%; min-height: var(--tap); display: grid; grid-template-columns: auto 1fr auto; gap: 12px; align-items: center;
+  border: 0; border-top: 1px solid var(--line); background: transparent; text-align: left; padding: 6px 0;
+}
+.gs-step:disabled { opacity: 1; cursor: default; color: var(--muted); text-decoration: line-through; }
+.gs-check { width: 26px; height: 26px; border-radius: 50%; border: 2px solid var(--plum); display: grid; place-items: center; font-weight: 800; color: var(--plum-ink); }
+.gs-step.done .gs-check { background: var(--plum); border-color: var(--plum); }

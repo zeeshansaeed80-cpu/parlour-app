@@ -13,7 +13,8 @@ import {
 import { receiptLines, drawReceipt, canvasToFile, shareOrDownload } from "./receipt.js";
 import { buildBackup } from "./backup.js";
 
-const APP_VERSION = "3.0.1";
+const APP_VERSION = "4.0.0";
+const BG_LOCK_MS = 2 * 60 * 1000; // owner app locks again after 2 minutes in the background
 const IDLE_LOCK_MS = 10 * 60 * 1000; // shop tablet locks after 10 minutes without use
 const UNDO_SECONDS = 30;
 
@@ -40,6 +41,7 @@ const state = {
   staffList: [],
   staff: null,       // shop tablet: the staff member who unlocked it
   role: null,        // "owner" or "shop"
+  locked: false,     // owner app lock (PIN on this device)
   reportTxns: [],
   reportKey: null,
   monthKey: null,
@@ -47,7 +49,7 @@ const state = {
   online: navigator.onLine,
   setupMsg: null,
   stack: [{ view: "home", params: {}, draft: null }],
-  ui: { clientQ: "", clientFilter: null, catType: "income", reportMonth: null }
+  ui: { clientQ: "", clientFilter: null, catType: "income", reportMonth: null, paneClient: null, paneSupplier: null }
 };
 let unsubs = [];
 let monthUnsub = null;
@@ -129,22 +131,42 @@ window.addEventListener("popstate", (e) => {
   }
 });
 
-function enterView() {
-  closeSheet();
+const isWide = () => window.matchMedia("(min-width: 900px)").matches;
+let watching = null;
+
+function watchProfile(kind, id) {
+  const key = kind && id ? `${kind}:${id}` : null;
+  if (watching === key) return;
   if (profileUnsub) { profileUnsub(); profileUnsub = null; }
   state.profileTxns = [];
+  watching = key;
+  if (!key || !state.user) return;
+  const field = kind === "client" ? "clientId" : "supplierId";
+  profileUnsub = onSnapshot(query(collection(db, "transactions"), where(field, "==", id)), { includeMetadataChanges: true }, (snap) => {
+    state.profileTxns = snap.docs.map((d) => ({ id: d.id, ...d.data({ serverTimestamps: "estimate" }), _pending: d.metadata.hasPendingWrites }));
+    dataChanged();
+  }, onLoadError);
+}
+
+function enterView() {
+  closeSheet();
   const { view, params } = cur();
   if (view === "reports") subscribeReport();
-  if (state.user && (view === "client" || view === "supplier")) {
-    const field = view === "client" ? "clientId" : "supplierId";
-    profileUnsub = onSnapshot(query(collection(db, "transactions"), where(field, "==", params.id)), { includeMetadataChanges: true }, (snap) => {
-      state.profileTxns = snap.docs.map((d) => ({ id: d.id, ...d.data({ serverTimestamps: "estimate" }), _pending: d.metadata.hasPendingWrites }));
-      if (cur().view === view) render();
-    }, onLoadError);
-  }
+  if (view === "client" || view === "supplier") watchProfile(view, params.id);
+  else if (view === "clients" && isWide() && state.ui.paneClient) watchProfile("client", state.ui.paneClient);
+  else if (view === "suppliers" && isWide() && state.ui.paneSupplier) watchProfile("supplier", state.ui.paneSupplier);
+  else watchProfile(null);
   render();
   window.scrollTo(0, 0);
 }
+
+// Redraw when the screen crosses between phone and tablet widths.
+let wasWide = isWide();
+window.addEventListener("resize", () => {
+  if (isWide() === wasWide) return;
+  wasWide = isWide();
+  if (state.user) enterView();
+});
 
 /* ---------- auth & data ---------- */
 onAuthStateChanged(auth, (user) => {
@@ -159,10 +181,11 @@ function stopData() {
   unsubs = [];
   if (monthUnsub) { monthUnsub(); monthUnsub = null; }
   if (profileUnsub) { profileUnsub(); profileUnsub = null; }
+  watching = null;
   if (reportUnsub) { reportUnsub(); reportUnsub = null; }
   Object.assign(state, {
     categories: [], lists: [], clients: [], suppliers: [], txns: [], profileTxns: [],
-    business: {}, backupMeta: null, staffList: [], staff: null, role: null,
+    business: {}, backupMeta: null, staffList: [], staff: null, role: null, locked: false,
     reportTxns: [], reportKey: null, monthKey: null, pendingCount: 0
   });
 }
@@ -170,6 +193,7 @@ function stopData() {
 function startData() {
   stopData();
   state.role = (state.user.email || "").toLowerCase() === SHOP_EMAIL ? "shop" : "owner";
+  state.locked = state.role === "owner" && !!getLock();
   state.stack = [{ view: isShop() ? "staffHome" : "home", params: {}, draft: null }];
   history.replaceState({ d: 0 }, "");
   render();
@@ -306,6 +330,7 @@ function render() {
   if (!state.authReady) { $app.innerHTML = `<div class="splash">Loading…</div>`; return; }
   if (!state.user) { renderLogin(); return; }
   if (isShop() && !state.staff) { document.body.classList.remove("has-savebar", "has-tabbar"); renderStaffLock(); return; }
+  if (!isShop() && state.locked) { document.body.classList.remove("has-savebar", "has-tabbar"); renderOwnerLock(); return; }
 
   // keep the cursor in the same box after a redraw
   const a = document.activeElement;
@@ -507,6 +532,7 @@ function renderHome() {
   </header>
   ${statusBanner()}
   ${backupBanner()}
+  ${gettingStarted()}
   <div class="home-grid">
     <div class="actions">
       <button class="big income" data-act="new-sale"><span class="big-sign" aria-hidden="true">+</span>New sale</button>
@@ -552,7 +578,7 @@ function clientRowsHtml() {
   return `<ul class="people">${list.map((c) => {
     const bt = clientBalanceText(c.balance);
     const sub = [prettyPhone(c.phone), listName(c.areaId)].filter(Boolean).join(" · ");
-    return `<li><button class="person" data-act="open-client" data-id="${esc(c.id)}">
+    return `<li><button class="person ${isWide() && state.ui.paneClient === c.id ? "selected" : ""}" data-act="open-client" data-id="${esc(c.id)}">
       <span class="avatar" aria-hidden="true">${esc((c.name || "?").trim().charAt(0).toUpperCase())}</span>
       <span class="person-main"><strong>${esc(c.name)}</strong><span class="muted small">${esc(sub || "No phone")}</span></span>
       ${bt.cls !== "settled" ? `<span class="bal ${bt.cls}">${esc(bt.text)}</span>` : ""}
@@ -562,11 +588,8 @@ function clientRowsHtml() {
 function renderClients() {
   const f = state.ui.clientFilter;
   const chip = (id, label) => `<button class="chip small-chip ${f === id ? "on" : ""}" data-act="client-filter" data-id="${esc(id || "")}" aria-pressed="${f === id}">${esc(label)}</button>`;
-  $app.innerHTML = `
-  <header class="topbar">
-    <div><p class="eyebrow">${state.clients.length} clients</p><h1>Clients</h1></div>
-    <button class="btn primary" data-act="add-client">+ Add</button>
-  </header>
+  const wide = isWide();
+  const listPart = `
   <input type="search" id="clients-q" class="search" placeholder="Search name or phone" value="${esc(state.ui.clientQ)}" autocomplete="off" aria-label="Search clients">
   <div class="filter-row" role="group" aria-label="Filter clients">
     ${chip(null, "All")}${chip("owes", "Owe money")}${chip("advance", "Advance")}
@@ -574,6 +597,14 @@ function renderClients() {
     ${listOf("area").map((a) => chip("area:" + a.id, a.name)).join("")}
   </div>
   <div id="client-list" class="list-pad">${clientRowsHtml()}</div>`;
+  $app.innerHTML = `
+  <header class="topbar">
+    <div><p class="eyebrow">${state.clients.length} clients</p><h1>Clients</h1></div>
+    <button class="btn primary" data-act="add-client">+ Add</button>
+  </header>
+  ${wide ? `<div class="split"><div class="split-list">${listPart}</div><div class="split-detail">${
+    state.ui.paneClient ? renderClient(state.ui.paneClient) : `<div class="empty pane-empty"><p>Tap a client to see their details here.</p></div>`
+  }</div></div>` : listPart}`;
   const q = document.getElementById("clients-q");
   q.addEventListener("input", () => {
     state.ui.clientQ = q.value;
@@ -587,18 +618,20 @@ function historyHtml(emptyText) {
   return `<ul class="txn-list">${list.map((t) => txnRow(t, { withDate: true })).join("")}</ul>`;
 }
 
-function renderClient() {
-  const c = clientById(cur().params.id);
+function renderClient(paneId = null) {
+  const c = clientById(paneId || cur().params.id);
   if (!c) {
-    $app.innerHTML = `${topbar("Client")}<div class="empty"><p>This client was not found (it may have been deleted).</p></div>`;
+    const html = `${topbar("Client", { back: !paneId })}<div class="empty"><p>This client was not found (it may have been deleted).</p></div>`;
+    if (paneId) return html;
+    $app.innerHTML = html;
     return;
   }
   const bal = toRupees(c.balance);
   const bt = clientBalanceText(bal);
   const tags = (c.tagIds || []).map(listName).filter(Boolean);
   const canDelete = !state.profileTxns.length && bal === 0;
-  $app.innerHTML = `
-  ${topbar(c.name, { right: `<button class="btn ghost" data-act="edit-client" data-id="${esc(c.id)}">Edit</button>` })}
+  const html = `
+  ${topbar(c.name, { back: !paneId, right: `<button class="btn ghost" data-act="edit-client" data-id="${esc(c.id)}">Edit</button>` })}
   <div class="profile">
     <article class="card balance-card ${bt.cls}">
       <p class="muted small">${bal > 0 ? "Owes you" : bal < 0 ? "Advance held" : "Balance"}</p>
@@ -624,6 +657,8 @@ function renderClient() {
     </section>
     ${canDelete ? `<button class="btn ghost danger block" data-act="delete-client" data-id="${esc(c.id)}">Delete client</button>` : ""}
   </div>`;
+  if (paneId) return html;
+  $app.innerHTML = html;
 }
 
 /* client form (add / edit) */
@@ -762,30 +797,39 @@ function newClientDoc(name, phone) {
 function renderSuppliers() {
   const list = state.suppliers.filter((s) => s.active !== false);
   const total = list.reduce((s, x) => s + Math.max(0, toRupees(x.balanceOwed)), 0);
-  $app.innerHTML = `
-  <header class="topbar">
-    <div><p class="eyebrow">You owe ${formatRs(total)}</p><h1>Suppliers</h1></div>
-    <button class="btn primary" data-act="add-supplier">+ Add</button>
-  </header>
+  const wide = isWide();
+  const listPart = `
   <div class="list-pad">
   ${list.length ? `<ul class="people">${list.map((s) => {
     const owed = toRupees(s.balanceOwed);
-    return `<li><button class="person" data-act="open-supplier" data-id="${esc(s.id)}">
+    return `<li><button class="person ${wide && state.ui.paneSupplier === s.id ? "selected" : ""}" data-act="open-supplier" data-id="${esc(s.id)}">
       <span class="avatar sup" aria-hidden="true">${esc((s.name || "?").trim().charAt(0).toUpperCase())}</span>
       <span class="person-main"><strong>${esc(s.name)}</strong><span class="muted small">${esc(prettyPhone(s.phone) || "No phone")}</span></span>
       ${owed > 0 ? `<span class="bal weowe">You owe ${formatRs(owed)}</span>` : ""}
     </button></li>`;
   }).join("")}</ul>` : `<div class="empty"><p>No suppliers yet.</p><p class="muted small">Add the shops you buy products from, so you can record buying on credit.</p></div>`}
   </div>`;
+  $app.innerHTML = `
+  <header class="topbar">
+    <div><p class="eyebrow">You owe ${formatRs(total)}</p><h1>Suppliers</h1></div>
+    <button class="btn primary" data-act="add-supplier">+ Add</button>
+  </header>
+  ${wide ? `<div class="split"><div class="split-list">${listPart}</div><div class="split-detail">${
+    state.ui.paneSupplier ? renderSupplier(state.ui.paneSupplier) : `<div class="empty pane-empty"><p>Tap a supplier to see their details here.</p></div>`
+  }</div></div>` : listPart}`;
 }
 
-function renderSupplier() {
-  const s = supplierById(cur().params.id);
-  if (!s) { $app.innerHTML = `${topbar("Supplier")}<div class="empty"><p>This supplier was not found.</p></div>`; return; }
+function renderSupplier(paneId = null) {
+  const s = supplierById(paneId || cur().params.id);
+  if (!s) {
+    const html = `${topbar("Supplier", { back: !paneId })}<div class="empty"><p>This supplier was not found.</p></div>`;
+    if (paneId) return html;
+    $app.innerHTML = html; return;
+  }
   const owed = toRupees(s.balanceOwed);
   const canDelete = !state.profileTxns.length && owed === 0;
-  $app.innerHTML = `
-  ${topbar(s.name, { right: `<button class="btn ghost" data-act="edit-supplier" data-id="${esc(s.id)}">Edit</button>` })}
+  const html = `
+  ${topbar(s.name, { back: !paneId, right: `<button class="btn ghost" data-act="edit-supplier" data-id="${esc(s.id)}">Edit</button>` })}
   <div class="profile">
     <article class="card balance-card ${owed > 0 ? "weowe" : "settled"}">
       <p class="muted small">${owed > 0 ? "You owe" : "Balance"}</p>
@@ -807,6 +851,8 @@ function renderSupplier() {
     </section>
     ${canDelete ? `<button class="btn ghost danger block" data-act="delete-supplier" data-id="${esc(s.id)}">Delete supplier</button>` : ""}
   </div>`;
+  if (paneId) return html;
+  $app.innerHTML = html;
 }
 
 function openSupplierForm(id = null) {
@@ -882,18 +928,22 @@ function renderSettings() {
       ${row("open-list", "Areas", listOf("area").map((m) => m.name).join(", ") || "None yet", 'data-kind="area"')}
     </section>
     <section class="card set-group">
+      ${row("open-lock", "App lock (this phone)", getLock() ? "On: asks for your PIN when the app opens" : "Off: anyone holding this phone can open the app")}
+    </section>
+    <section class="card set-group">
       ${row("open-staff", "Staff (shop tablet)", state.staffList.filter((x) => x.active !== false).map((x) => x.name).join(", ") || "No staff yet: add names and PINs")}
     </section>
     <section class="card set-group">
       <div class="set-info"><strong>Backup</strong><span class="muted small">Last backup: ${esc(last)}. Saves a copy of all data as one file you can keep in Google Drive.</span></div>
       <button class="btn primary block" data-act="backup">Save backup now</button>
     </section>
+    ${freePlanCard()}
     <section class="card set-group">
       <div class="set-info"><strong>Account</strong><span class="muted small">Signed in as ${esc(state.user?.email || "")}</span></div>
       ${n ? `<p class="warn-text small">${n} ${n === 1 ? "entry hasn't" : "entries haven't"} synced yet. Connect to the internet before signing out.</p>` : ""}
       <button class="btn ghost danger block" data-act="sign-out">Sign out</button>
     </section>
-    <p class="muted small center">Stage 3 · version ${esc(APP_VERSION)}</p>
+    <p class="muted small center">Version ${esc(APP_VERSION)}</p>
   </div>`;
 }
 
@@ -1791,7 +1841,10 @@ const actions = {
 
   // clients
   "add-client": () => openClientForm(),
-  "open-client": (el) => go("client", { id: el.dataset.id }),
+  "open-client": (el) => {
+    if (cur().view === "clients" && isWide()) { state.ui.paneClient = el.dataset.id; watchProfile("client", el.dataset.id); render(); return; }
+    go("client", { id: el.dataset.id });
+  },
   "edit-client": (el) => openClientForm(el.dataset.id),
   "client-filter": (el) => { state.ui.clientFilter = el.dataset.id || null; render(); },
   "save-client-form": () => saveClientForm(),
@@ -1799,7 +1852,7 @@ const actions = {
   "pay-from-client": (el) => openPayment(el.dataset.id),
   "delete-client": (el) => twoTap(el, "Tap again to delete this client", () => {
     deleteDoc(doc(db, "clients", el.dataset.id)).catch(onWriteError);
-    goBack();
+    if (cur().view === "client") goBack(); else { state.ui.paneClient = null; watchProfile(null); render(); }
     toast("Client deleted.");
   }),
   "form-pick": (el) => {
@@ -1827,14 +1880,17 @@ const actions = {
 
   // suppliers
   "add-supplier": () => openSupplierForm(),
-  "open-supplier": (el) => go("supplier", { id: el.dataset.id }),
+  "open-supplier": (el) => {
+    if (cur().view === "suppliers" && isWide()) { state.ui.paneSupplier = el.dataset.id; watchProfile("supplier", el.dataset.id); render(); return; }
+    go("supplier", { id: el.dataset.id });
+  },
   "edit-supplier": (el) => openSupplierForm(el.dataset.id),
   "save-supplier-form": () => saveSupplierForm(),
   "expense-for-supplier": (el) => openExpense(el.dataset.id),
   "pay-this-supplier": (el) => openSupplierPay(el.dataset.id),
   "delete-supplier": (el) => twoTap(el, "Tap again to delete this supplier", () => {
     deleteDoc(doc(db, "suppliers", el.dataset.id)).catch(onWriteError);
-    goBack();
+    if (cur().view === "supplier") goBack(); else { state.ui.paneSupplier = null; watchProfile(null); render(); }
     toast("Supplier deleted.");
   }),
   "pick-supplier": (el) => {
@@ -2239,6 +2295,144 @@ Object.assign(actions, {
   "open-txn": (el) => { closeSheet(); openTxnSheet(el.dataset.id); }
 });
 
+
+
+/* ---------- owner app lock (PIN, this device only) ---------- */
+const lockKey = () => `lock.${state.user?.uid}`;
+function getLock() { return state.user ? store.get(lockKey(), null) : null; }
+let ownerPin = { digits: "", error: "", fails: 0, waitUntil: 0 };
+let hiddenAt = 0;
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") { hiddenAt = Date.now(); return; }
+  if (state.user && !isShop() && !state.locked && getLock() && hiddenAt && Date.now() - hiddenAt > BG_LOCK_MS) {
+    state.locked = true;
+    closeSheet();
+    render();
+  }
+});
+
+function renderOwnerLock() {
+  const waiting = ownerPin.waitUntil > Date.now();
+  $app.innerHTML = `
+  <section class="lock">
+    <img src="icons/icon-192.png" alt="" class="login-logo" width="64" height="64">
+    <p class="eyebrow">${esc(state.business.name || "Parlour Accounts")}</p>
+    <h1>Enter your app PIN</h1>
+    <div class="pin-dots" aria-label="${ownerPin.digits.length} of 4 digits entered">${[0, 1, 2, 3].map((i) => `<span class="${i < ownerPin.digits.length ? "on" : ""}"></span>`).join("")}</div>
+    <p class="error" role="alert">${esc(waiting ? "Too many wrong tries. Wait 30 seconds." : ownerPin.error)}</p>
+    <div class="np-keys pin-keys">${["1", "2", "3", "4", "5", "6", "7", "8", "9", "", "0", "⌫"].map((k) => k ? `
+      <button type="button" class="np-key" data-act="owner-pin-key" data-key="${k}" aria-label="${k === "⌫" ? "Delete" : k}" ${waiting ? "disabled" : ""}>${k}</button>` : "<span></span>").join("")}</div>
+    <button class="btn ghost" data-act="forgot-pin">Forgot PIN? Sign out</button>
+    <p class="muted small">Signing out removes the PIN from this phone. You'll need your email and password to sign in again.</p>
+  </section>`;
+}
+
+async function ownerPinKey(k) {
+  if (ownerPin.waitUntil > Date.now()) return;
+  ownerPin.error = "";
+  if (k === "⌫") ownerPin.digits = ownerPin.digits.slice(0, -1);
+  else if (ownerPin.digits.length < 4) ownerPin.digits += k;
+  render();
+  if (ownerPin.digits.length < 4) return;
+  const l = getLock();
+  const ok = l && (await hashPin(ownerPin.digits, l.pinSalt)) === l.pinHash;
+  if (ok) {
+    ownerPin = { digits: "", error: "", fails: 0, waitUntil: 0 };
+    state.locked = false;
+    render();
+  } else {
+    ownerPin.fails++;
+    ownerPin.digits = "";
+    ownerPin.error = "Wrong PIN. Try again.";
+    if (ownerPin.fails >= 5) { ownerPin.fails = 0; ownerPin.waitUntil = Date.now() + 30000; setTimeout(render, 30500); }
+    render();
+  }
+}
+
+function openLockSheet() {
+  const on = !!getLock();
+  openSheet(`
+    <h2>App lock (this phone)</h2>
+    <p class="muted small">${on ? "The app asks for your PIN when it opens, and again after 2 minutes in the background." : "Set a 4-digit PIN. The app will ask for it when it opens, and after 2 minutes in the background. Only this phone is affected."}</p>
+    <form id="lock-form" class="stack" novalidate>
+      <label class="field"><span>${on ? "New 4-digit PIN" : "4-digit PIN"}</span><input type="password" id="lk-pin" inputmode="numeric" maxlength="4" autocomplete="new-password"></label>
+      <label class="field"><span>Type the PIN again</span><input type="password" id="lk-pin2" inputmode="numeric" maxlength="4" autocomplete="new-password"></label>
+      <p class="error" role="alert"></p>
+      <div class="row-btns">
+        <button type="button" class="btn ghost" data-act="close-sheet">Cancel</button>
+        <button type="submit" class="btn primary">${on ? "Change PIN" : "Turn on"}</button>
+      </div>
+      ${on ? `<button type="button" class="btn ghost danger block" data-act="lock-off">Turn off app lock</button>` : ""}
+    </form>`);
+  document.getElementById("lk-pin").focus();
+  document.getElementById("lock-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const err = $sheet.querySelector(".error");
+    const pin = document.getElementById("lk-pin").value.trim();
+    const pin2 = document.getElementById("lk-pin2").value.trim();
+    if (!isValidPin(pin)) { err.textContent = "The PIN must be exactly 4 digits."; return; }
+    if (pin !== pin2) { err.textContent = "The two PINs don't match."; return; }
+    const pinSalt = newSalt();
+    store.set(lockKey(), { pinSalt, pinHash: await hashPin(pin, pinSalt) });
+    closeSheet();
+    render();
+    toast(on ? "PIN changed." : "App lock is on for this phone.");
+  });
+}
+
+/* ---------- first-run checklist (owner home) ---------- */
+function gettingStarted() {
+  if (store.get("gsDismissed", false) || !state.categories.length) return "";
+  const steps = [
+    { done: !!state.business.name, act: "open-business", text: "Add your parlour's name for receipts" },
+    { done: state.staffList.length > 0, act: "open-staff", text: "Add staff names and PINs for the shop tablet" },
+    { done: !!getLock(), act: "open-lock", text: "Turn on the app lock on this phone" },
+    { done: !!state.backupMeta?.lastDate, act: "backup", text: "Save your first backup" }
+  ];
+  if (steps.every((x) => x.done)) return "";
+  return `
+  <article class="card getting-started">
+    <header><h2>Getting started</h2><button class="icon-btn small" data-act="gs-dismiss" aria-label="Hide getting started">×</button></header>
+    <ul>${steps.map((x) => `<li><button class="gs-step ${x.done ? "done" : ""}" data-act="${x.act}" ${x.done ? "disabled" : ""}>
+      <span class="gs-check" aria-hidden="true">${x.done ? "✓" : ""}</span><span>${esc(x.text)}</span>${x.done ? "" : `<span class="chev" aria-hidden="true">›</span>`}</button></li>`).join("")}</ul>
+  </article>`;
+}
+
+/* ---------- free plan check (Settings) ---------- */
+// A fresh app start reads, at most, every record it keeps on screen. Reopening within
+// about 30 minutes only reads what changed, so real use is usually much lower.
+function freePlanCard() {
+  const perStart = state.categories.length + state.lists.length + state.clients.length + state.suppliers.length
+    + state.staffList.length + state.txns.length + 4;
+  const starts = Math.floor(50000 / Math.max(perStart, 1));
+  const tight = starts < 60;
+  return `
+  <section class="card set-group">
+    <div class="set-info"><strong>Free plan check</strong>
+      <span class="muted small">A fresh start of the app reads up to <strong>${perStart.toLocaleString("en-PK")}</strong> records
+      (${state.clients.length} clients, ${state.txns.length} entries this month, plus lists). The free plan allows 50,000 reads a day
+      across all devices: about <strong>${starts.toLocaleString("en-PK")}</strong> fresh starts a day. Reopening within 30 minutes costs much less.</span>
+      ${tight ? `<span class="warn-text small">Getting close: keep the shop tablet app open during the day rather than closing it, and check Firebase → Firestore → Usage.</span>` : `<span class="muted small">You're well within the limit. Exact numbers: Firebase console → Firestore → Usage.</span>`}
+    </div>
+  </section>`;
+}
+
+Object.assign(actions, {
+  "owner-pin-key": (el) => ownerPinKey(el.dataset.key),
+  "forgot-pin": () => {
+    try { localStorage.removeItem("pa." + lockKey()); } catch { /* ignore */ }
+    state.locked = false;
+    signOut(auth);
+  },
+  "open-lock": () => openLockSheet(),
+  "lock-off": () => {
+    try { localStorage.removeItem("pa." + lockKey()); } catch { /* ignore */ }
+    closeSheet(); render();
+    toast("App lock turned off for this phone.");
+  },
+  "gs-dismiss": () => { store.set("gsDismissed", true); render(); }
+});
 
 function askPriceAndAdd(mainId, subId) {
   const main = catById(mainId);

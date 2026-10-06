@@ -18,7 +18,7 @@
 | 12 | WhatsApp consent | Flag per client, default "yes" |
 | 13 | Reports | Daily/monthly profit and loss; client and supplier balances |
 | 14 | Offline | Works offline, syncs automatically |
-| 15 | Security | Staff PINs, owner PIN/fingerprint, daily backup; no Excel/PDF export |
+| 15 | Security | Staff PINs, owner PIN lock per phone (no fingerprint, owner's choice), daily backup; no Excel/PDF export |
 | 16 | Language | English |
 | 17 | Budget | Free only; first version as soon as possible |
 | 18 | Maintenance | Owner (learning to code); few moving parts |
@@ -43,7 +43,7 @@
 1. **Core entry** (done, v1.0): login, rules, offline, seeded categories, New sale (multi-service, quick add-client), New expense, today's list, home totals, Undo, delete, installable
 2. **Clients & balances** (done, v2.0): client list/profile/tags/areas, partial payments & advances, suppliers, category & list manager, receipt sharing, daily backup file
 3. **Shop tablet & reports** (done, v3.0): shop account, staff PINs, staff home, server-enforced staff limits, P&L and balance reports
-4. Polish: owner PIN/fingerprint lock, tablet two-pane layout, dark-mode check, empty states, free-limit check
+4. **Polish** (done, v4.0): owner PIN lock per phone (fingerprint dropped at owner's request), tablet two-pane Clients/Suppliers, getting-started checklist, free-plan check in Settings, dark-mode checked
 
 ## WhatsApp readiness
 In place: international phone format, consent flag + date, tags/area/birthday fields, sales linked to clients.

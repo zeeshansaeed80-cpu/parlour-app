@@ -1,4 +1,4 @@
-# Parlour Accounts (Stage 3)
+# Parlour Accounts (Stage 4)
 
 Income, expenses and clients for the parlour. A plain HTML/CSS/JS web app that installs
 to the home screen, works offline, and syncs through Firebase.
@@ -85,6 +85,27 @@ On iPhone/iPad: Safari → Share → **Add to Home Screen**.
    Staff can't: see totals, reports, the client list, suppliers, settings, or change the date.
 4. **Lock:** tap Lock; the tablet also locks itself after 10 minutes without use.
 5. **Owner phone:** tap a staff entry → "Entered by <name> (shop tablet)".
+
+## What to test (Stage 4)
+1. **Getting started** card on Home: each step opens the right screen and ticks itself when done (× hides the card).
+2. **App lock (owner phones):** Settings → App lock (this phone) → set a 4-digit PIN.
+   Close and reopen the app: it asks for the PIN. It also asks again after 2 minutes in the background.
+   Wrong PIN 5 times = 30-second wait. "Forgot PIN? Sign out" removes the PIN; sign in again with email + password.
+   Each phone has its own app lock; the shop tablet keeps using staff PINs.
+3. **Tablet layout:** on a tablet (landscape), Clients and Suppliers show the list on the left and details on the right.
+4. **Free plan check:** Settings shows roughly how many fresh app starts a day the free plan allows with your data.
+
+## Free plan limits (checked Oct 2026)
+Firebase's free (Spark) plan: 50,000 reads, 20,000 writes and 20,000 deletes per day, 1 GiB storage.
+- A **sale** uses 1–2 writes; a **fresh start** of the app reads every category, list, client, supplier,
+  staff member and this month's entries once (Settings → Free plan check shows the number).
+- Reopening within about 30 minutes only reads what changed, so keeping the tablet app open all day is cheapest.
+- Example: with 1,000 clients and 20 sales a day, a fresh start near the end of the month reads about
+  1,700 records (1,000 clients + ~600 entries + lists), so the free plan covers about 29 fresh starts a day
+  across all devices. Today, with little data, it's hundreds.
+- Settings → Free plan check shows the live number and warns when it drops below 60 starts a day. If you see
+  that warning, tell Claude: the fix is to load clients and the month's entries in smaller pieces.
+- If the limit is ever hit, the app keeps working offline and syncs the next day; nothing is lost.
 
 ## Updating the app later
 After changing any file, bump `VERSION` in `sw.js` (e.g. `parlour-v1.0.1`) so installed copies
