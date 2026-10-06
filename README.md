@@ -1,4 +1,4 @@
-# Parlour Accounts (Stage 2)
+# Parlour Accounts (Stage 3)
 
 Income, expenses and clients for the parlour. A plain HTML/CSS/JS web app that installs
 to the home screen, works offline, and syncs through Firebase.
@@ -67,6 +67,24 @@ On iPhone/iPad: Safari → Share → **Add to Home Screen**.
 10. **Backup:** tap Back up on the home banner (or Settings → Save backup now) → Save / share file → choose Drive.
     The banner disappears for the rest of the day on all devices.
 11. **Phone back button** goes back one screen instead of closing the app.
+
+## Shop tablet setup (Stage 3, one time)
+1. Firebase → Authentication → Users → **Add user**:
+   email `shop@parlour-accounts.firebaseapp.com`, plus a password only the owners know.
+   (It doesn't need to be a real mailbox.)
+2. Publish the new `firestore.rules`.
+3. On the owner's phone: Settings → **Staff (shop tablet)** → add each staff name with a 4-digit PIN.
+4. On the shop tablet: open the app and sign in once with the shop email and password.
+   From then on the tablet shows "Who's using the tablet?" and staff use their PIN.
+
+## What to test (Stage 3)
+1. **Reports tab (owner):** this month's income, expenses and profit; day-by-day rows (tap a day to see its entries);
+   ◀ ▶ to change month; lists of who owes you, advances and what you owe suppliers.
+2. **Staff:** on the tablet, pick a name, enter a wrong PIN (refused), then the right one.
+3. Staff can: New sale, Receive payment, New expense (paid in full only), New client, Undo right after saving.
+   Staff can't: see totals, reports, the client list, suppliers, settings, or change the date.
+4. **Lock:** tap Lock; the tablet also locks itself after 10 minutes without use.
+5. **Owner phone:** tap a staff entry → "Entered by <name> (shop tablet)".
 
 ## Updating the app later
 After changing any file, bump `VERSION` in `sw.js` (e.g. `parlour-v1.0.1`) so installed copies

@@ -13,7 +13,7 @@ import {
 import { receiptLines, drawReceipt, canvasToFile, shareOrDownload } from "./receipt.js";
 import { buildBackup } from "./backup.js";
 
-const APP_VERSION = "3.0.0";
+const APP_VERSION = "3.0.1";
 const IDLE_LOCK_MS = 10 * 60 * 1000; // shop tablet locks after 10 minutes without use
 const UNDO_SECONDS = 30;
 
@@ -173,7 +173,7 @@ function startData() {
   state.stack = [{ view: isShop() ? "staffHome" : "home", params: {}, draft: null }];
   history.replaceState({ d: 0 }, "");
   render();
-  const sub = (ref, fn) => unsubs.push(onSnapshot(ref, fn, onLoadError));
+  const sub = (ref, fn) => unsubs.push(onSnapshot(ref, fn, (err) => onLoadError(err, ref.path)));
   sub(collection(db, "staff"), (snap) => {
     state.staffList = snap.docs.map((d) => ({ id: d.id, ...d.data() })).sort(byName);
     if (state.staff && !state.staffList.some((x) => x.id === state.staff.id && x.active !== false)) state.staff = null;
@@ -271,10 +271,14 @@ async function ensureSeed() {
   batch.commit().catch(onWriteError);
 }
 
-function onLoadError(err) {
-  console.error(err);
+function onLoadError(err, what = "") {
+  console.error(err, what);
   if (err?.code === "permission-denied") {
-    toast("Access denied by the database. Check that your email is in the security rules (see README).", { error: true, ms: 10000 });
+    const who = state.user?.email || "this login";
+    const hint = isShop()
+      ? "Check that the latest firestore.rules are published (they must mention the shop email)."
+      : `Check that ${who} is in the owner list in firestore.rules.`;
+    toast(`Access denied${what ? ` to "${what}"` : ""} for ${who}. ${hint}`, { error: true, ms: 15000 });
   } else {
     toast("Couldn't load data: " + (err?.message || err), { error: true });
   }
@@ -1991,6 +1995,7 @@ function renderStaffLock() {
         </button>`).join("")}</div>`
         : `<div class="empty"><p>No staff added yet.</p><p class="muted small">The owner can add staff names and PINs in <strong>Settings → Staff</strong> on their phone.</p></div>`}
       <button class="btn ghost" data-act="sign-out">Sign out of shop account</button>
+      <p class="muted small">Signed in as ${esc(state.user?.email || "")} · version ${esc(APP_VERSION)}</p>
     </section>`;
     return;
   }
@@ -2258,6 +2263,14 @@ document.addEventListener("click", (e) => {
 
 /* ---------- install as app (offline shell) ---------- */
 if ("serviceWorker" in navigator && location.protocol !== "file:") {
+  // When a new version of the app has been downloaded, switch to it straight away.
+  const hadController = !!navigator.serviceWorker.controller;
+  let reloading = false;
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (!hadController || reloading) return;
+    reloading = true;
+    location.reload();
+  });
   window.addEventListener("load", () => {
     navigator.serviceWorker.register("./sw.js").catch((err) => console.warn("Service worker not registered:", err));
   });

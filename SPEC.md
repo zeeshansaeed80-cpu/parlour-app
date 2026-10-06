@@ -35,13 +35,14 @@
 - **transactions**: kind (sale/expense/clientPayment/supplierPayment), total, paidNow, date (YYYY-MM-DD), paymentMethodId, clientId, clientName, items[] {categoryId, subCategoryId, name, price} (sales), categoryId/subCategoryId/label (expenses), supplierId, note, receiptNo, createdAt, createdByUser, createdByStaff
 - **meta/setup**: seedVersion, seededAt
 - Sales also store advanceUsed and balanceDelta; payments are transactions of kind clientPayment / supplierPayment. Deleting an entry reverses its balanceDelta.
+- **staff**: name, pinSalt, pinHash (SHA-256), active. Shop login: shop@parlour-accounts.firebaseapp.com; staff entries carry createdByStaff + createdByStaffName. Staff can undo own entries for 10 min (server rule); app offers 30 s.
 - Business details live in meta/business; last backup date in meta/backup.
 - Change from the plan: sale services are stored as an `items` list inside the sale instead of a separate collection (fewer reads/writes, same information).
 
 ## Stages
 1. **Core entry** (done, v1.0): login, rules, offline, seeded categories, New sale (multi-service, quick add-client), New expense, today's list, home totals, Undo, delete, installable
 2. **Clients & balances** (done, v2.0): client list/profile/tags/areas, partial payments & advances, suppliers, category & list manager, receipt sharing, daily backup file
-3. Shop tablet & reports: shop account, staff PINs, staff home, server-enforced staff limits, P&L and balance reports
+3. **Shop tablet & reports** (done, v3.0): shop account, staff PINs, staff home, server-enforced staff limits, P&L and balance reports
 4. Polish: owner PIN/fingerprint lock, tablet two-pane layout, dark-mode check, empty states, free-limit check
 
 ## WhatsApp readiness

@@ -1,10 +1,9 @@
 rules_version = '2';
 
-// Stage 2 security rules: only the owner logins listed below can read or write.
-// Everyone else (including anyone who finds the app's web address) is blocked by the server.
-//
-// To add an owner: add their exact login email to the list (lowercase, in quotes,
-// with a comma between emails). Staff access (shop tablet) is added in Stage 3.
+// Stage 3 security rules.
+// - Owners (emails below) can read and change everything.
+// - The shop tablet login can only do what staff are allowed to do. This is
+//   enforced here on the server, so it can't be bypassed from the tablet.
 
 service cloud.firestore {
   match /databases/{database}/documents {
@@ -15,6 +14,11 @@ service cloud.firestore {
           'zeeshansaeedffl@gmail.com',
           'hinazeeshan822@gmail.com'
         ];
+    }
+
+    function isShop() {
+      return request.auth != null
+        && request.auth.token.email == 'shop@parlour-accounts.firebaseapp.com';
     }
 
     // Money is always whole rupees. Checks every saved entry.
@@ -30,17 +34,38 @@ service cloud.firestore {
         && (d.kind != 'expense' || d.paidNow == d.total || d.supplierId is string);
     }
 
+    // Staff (shop tablet): sales, client payments and paid-in-full expenses only,
+    // stamped with the staff member and the server's clock.
+    function validStaffTxn() {
+      let d = request.resource.data;
+      return d.kind in ['sale', 'clientPayment', 'expense']
+        && (d.kind != 'expense' || (d.paidNow == d.total && d.supplierId == null))
+        && d.createdByStaff is string
+        && d.createdByUser == request.auth.uid
+        && d.createdAt == request.time;
+    }
+
+    function validClient() {
+      let d = request.resource.data;
+      return d.name is string && d.name.size() > 0 && d.phone is string && d.balance is int;
+    }
+
     match /transactions/{id} {
-      allow read, delete: if isOwner();
-      allow create, update: if isOwner() && validTxn();
+      allow read: if isOwner();
+      allow create: if validTxn() && (isOwner() || (isShop() && validStaffTxn()));
+      allow update: if isOwner() && validTxn();
+      // Staff can only undo their own entry, shortly after saving it.
+      allow delete: if isOwner()
+        || (isShop() && resource.data.createdByUser == request.auth.uid
+            && request.time < resource.data.createdAt + duration.value(10, 'm'));
     }
 
     match /clients/{id} {
-      allow read, delete: if isOwner();
-      allow create, update: if isOwner()
-        && request.resource.data.name is string && request.resource.data.name.size() > 0
-        && request.resource.data.phone is string
-        && request.resource.data.balance is int;
+      allow read: if isOwner() || isShop();
+      allow create: if validClient() && (isOwner() || (isShop() && request.resource.data.balance == 0));
+      allow update: if validClient() && (isOwner()
+        || (isShop() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['balance'])));
+      allow delete: if isOwner();
     }
 
     match /suppliers/{id} {
@@ -50,8 +75,22 @@ service cloud.firestore {
         && request.resource.data.balanceOwed is int;
     }
 
-    match /categories/{id} { allow read, write: if isOwner(); }
-    match /lists/{id}      { allow read, write: if isOwner(); }
-    match /meta/{id}       { allow read, write: if isOwner(); }
+    match /staff/{id} {
+      allow read: if isOwner() || isShop();
+      allow write: if isOwner();
+    }
+
+    match /categories/{id} {
+      allow read: if isOwner() || isShop();
+      allow write: if isOwner();
+    }
+    match /lists/{id} {
+      allow read: if isOwner() || isShop();
+      allow write: if isOwner();
+    }
+    match /meta/{id} {
+      allow read: if isOwner() || (isShop() && id in ['business', 'setup']);
+      allow write: if isOwner();
+    }
   }
 }
