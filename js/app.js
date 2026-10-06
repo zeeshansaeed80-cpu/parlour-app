@@ -1,36 +1,53 @@
 import {
   auth, db, onAuthStateChanged, signInWithEmailAndPassword, signOut,
-  collection, doc, setDoc, deleteDoc, getDoc, getDocFromCache, onSnapshot,
-  query, where, writeBatch, serverTimestamp
+  collection, doc, setDoc, updateDoc, deleteDoc, getDoc, getDocFromCache, onSnapshot,
+  query, where, writeBatch, serverTimestamp, increment
 } from "./firebase.js";
-import { buildDefaultCategories, DEFAULT_PAYMENT_METHODS, SEED_VERSION } from "./seed.js";
+import { buildDefaultCategories, DEFAULT_PAYMENT_METHODS, DEFAULT_TAGS, SEED_VERSION } from "./seed.js";
 import {
   esc, formatRs, toRupees, localDateStr, monthRange, niceDate, monthName,
-  normalizePhone, prettyPhone, receiptNo, totalsFor, searchClients, itemsTotal
+  normalizePhone, prettyPhone, receiptNo, totalsFor, searchClients, itemsTotal,
+  clientBalanceText, balanceSummary, saleSplit, byNewest, MONTHS, birthdayText
 } from "./util.js";
+import { receiptLines, drawReceipt, canvasToFile, shareOrDownload } from "./receipt.js";
+import { buildBackup } from "./backup.js";
+
+const APP_VERSION = "2.0.0";
+const UNDO_SECONDS = 30;
 
 const $app = document.getElementById("app");
 const $sheet = document.getElementById("sheet-root");
 const $toast = document.getElementById("toast-root");
 
-const UNDO_SECONDS = 30;
+const TABS = ["home", "clients", "suppliers", "settings"];
+const LIVE_VIEWS = new Set(["home", "clients", "suppliers", "settings", "client", "supplier", "categories", "lists"]);
+const ENTRY_VIEWS = new Set(["sale", "expense", "payment", "supplierPay", "clientForm", "supplierForm", "business"]);
+const PAD_VIEWS = new Set(["expense", "payment", "supplierPay"]);
 
 const state = {
   user: null,
   authReady: false,
   categories: [],
-  methods: [],
+  lists: [],
   clients: [],
-  txns: [],
+  suppliers: [],
+  txns: [],          // this month
+  profileTxns: [],   // history of the client/supplier being viewed
+  business: {},
+  backupMeta: null,
   monthKey: null,
   pendingCount: 0,
   online: navigator.onLine,
   setupMsg: null,
-  view: "home",
-  draft: null
+  stack: [{ view: "home", params: {}, draft: null }],
+  ui: { clientQ: "", clientFilter: null, catType: "income" }
 };
 let unsubs = [];
 let monthUnsub = null;
+let profileUnsub = null;
+
+const cur = () => state.stack[state.stack.length - 1];
+const D = () => cur().draft;
 
 /* ---------- small storage helpers (per device) ---------- */
 const store = {
@@ -52,23 +69,71 @@ function rememberClient(id) {
   store.set("recentClients", list.slice(0, 8));
 }
 
-/* ---------- category helpers ---------- */
+/* ---------- lookups ---------- */
 function byUsageThenOrder(a, b) {
   const u = store.get("usage", {});
   return (u[b.id] || 0) - (u[a.id] || 0) || (a.sortOrder ?? 0) - (b.sortOrder ?? 0);
 }
+const byOrder = (a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0) || (a.name || "").localeCompare(b.name || "");
+const byName = (a, b) => (a.name || "").localeCompare(b.name || "");
 const activeCats = () => state.categories.filter((c) => c.active !== false);
 const mains = (type) => activeCats().filter((c) => c.type === type && !c.parentId).sort(byUsageThenOrder);
 const subsOf = (parentId) => activeCats().filter((c) => c.parentId === parentId).sort(byUsageThenOrder);
 const catById = (id) => state.categories.find((c) => c.id === id);
-const methodName = (id) => state.methods.find((m) => m.id === id)?.name || "";
-function sortedMethods() {
-  return state.methods.filter((m) => m.active !== false).sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
-}
+const listOf = (kind, all = false) => state.lists.filter((l) => l.kind === kind && (all || l.active !== false)).sort(byOrder);
+const listName = (id) => state.lists.find((l) => l.id === id)?.name || "";
+const methodName = (id) => listName(id);
+const sortedMethods = () => listOf("paymentMethod");
+const clientById = (id) => state.clients.find((c) => c.id === id);
+const supplierById = (id) => state.suppliers.find((s) => s.id === id);
+const liveBalance = (clientId) => toRupees(clientById(clientId)?.balance || 0);
 function defaultMethodId() {
   const last = store.get("lastMethod", null);
   const list = sortedMethods();
   return list.find((m) => m.id === last)?.id || list[0]?.id || null;
+}
+
+/* ---------- navigation (works with the phone's back button) ---------- */
+function go(view, params = {}, draft = null) {
+  state.stack.push({ view, params, draft });
+  history.pushState({ d: state.stack.length - 1 }, "");
+  enterView();
+}
+function goBack() {
+  if (state.stack.length > 1) history.back();
+}
+function switchTab(tab) {
+  state.stack = [{ view: tab, params: {}, draft: null }];
+  history.replaceState({ d: 0 }, "");
+  enterView();
+}
+window.addEventListener("popstate", (e) => {
+  const d = e.state?.d ?? 0;
+  if (document.body.classList.contains("sheet-open")) {
+    closeSheet();
+    if (d < state.stack.length - 1) history.pushState({ d: state.stack.length - 1 }, "");
+    return;
+  }
+  if (d < state.stack.length - 1) {
+    state.stack.length = Math.max(1, d + 1);
+    enterView();
+  }
+});
+
+function enterView() {
+  closeSheet();
+  if (profileUnsub) { profileUnsub(); profileUnsub = null; }
+  state.profileTxns = [];
+  const { view, params } = cur();
+  if (state.user && (view === "client" || view === "supplier")) {
+    const field = view === "client" ? "clientId" : "supplierId";
+    profileUnsub = onSnapshot(query(collection(db, "transactions"), where(field, "==", params.id)), { includeMetadataChanges: true }, (snap) => {
+      state.profileTxns = snap.docs.map((d) => ({ id: d.id, ...d.data({ serverTimestamps: "estimate" }), _pending: d.metadata.hasPendingWrites }));
+      if (cur().view === view) render();
+    }, onLoadError);
+  }
+  render();
+  window.scrollTo(0, 0);
 }
 
 /* ---------- auth & data ---------- */
@@ -83,27 +148,38 @@ function stopData() {
   unsubs.forEach((u) => u());
   unsubs = [];
   if (monthUnsub) { monthUnsub(); monthUnsub = null; }
-  Object.assign(state, { categories: [], methods: [], clients: [], txns: [], monthKey: null, pendingCount: 0 });
+  if (profileUnsub) { profileUnsub(); profileUnsub = null; }
+  Object.assign(state, {
+    categories: [], lists: [], clients: [], suppliers: [], txns: [], profileTxns: [],
+    business: {}, backupMeta: null, monthKey: null, pendingCount: 0
+  });
 }
 
 function startData() {
   stopData();
-  state.view = "home";
+  state.stack = [{ view: "home", params: {}, draft: null }];
+  history.replaceState({ d: 0 }, "");
   render();
   ensureSeed();
-  unsubs.push(onSnapshot(collection(db, "categories"), (snap) => {
+  const sub = (ref, fn) => unsubs.push(onSnapshot(ref, fn, onLoadError));
+  sub(collection(db, "categories"), (snap) => {
     state.categories = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-    dataChanged("categories");
-  }, onLoadError));
-  unsubs.push(onSnapshot(query(collection(db, "lists"), where("kind", "==", "paymentMethod")), (snap) => {
-    state.methods = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-    dataChanged("methods");
-  }, onLoadError));
-  unsubs.push(onSnapshot(collection(db, "clients"), (snap) => {
-    state.clients = snap.docs.map((d) => ({ id: d.id, ...d.data() }))
-      .sort((a, b) => (a.name || "").localeCompare(b.name || ""));
-    dataChanged("clients");
-  }, onLoadError));
+    dataChanged();
+  });
+  sub(collection(db, "lists"), (snap) => {
+    state.lists = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    dataChanged();
+  });
+  sub(collection(db, "clients"), (snap) => {
+    state.clients = snap.docs.map((d) => ({ id: d.id, ...d.data() })).sort(byName);
+    dataChanged();
+  });
+  sub(collection(db, "suppliers"), (snap) => {
+    state.suppliers = snap.docs.map((d) => ({ id: d.id, ...d.data() })).sort(byName);
+    dataChanged();
+  });
+  sub(doc(db, "meta", "business"), (snap) => { state.business = snap.exists() ? snap.data() : {}; dataChanged(); });
+  sub(doc(db, "meta", "backup"), (snap) => { state.backupMeta = snap.exists() ? snap.data() : null; dataChanged(); });
   subscribeMonth();
 }
 
@@ -118,15 +194,23 @@ function subscribeMonth() {
       id: d.id, ...d.data({ serverTimestamps: "estimate" }), _pending: d.metadata.hasPendingWrites
     }));
     state.pendingCount = state.txns.filter((t) => t._pending).length;
-    dataChanged("txns");
+    dataChanged();
   }, onLoadError);
 }
 
-// Re-draw the home screen when data changes. Entry screens are not redrawn while
-// someone is typing, except when categories/methods arrive for the first time.
-function dataChanged(what) {
-  if (state.view === "home") render();
-  else if (state.draft && (what === "categories" || what === "methods") && state.draft.waitingForData) render();
+// Re-draw when data changes. Lists redraw straight away; entry screens only
+// redraw when nobody is typing in a box (so typing is never interrupted).
+let redrawQueued = false;
+function dataChanged() {
+  if (redrawQueued) return;
+  redrawQueued = true;
+  queueMicrotask(() => {
+    redrawQueued = false;
+    if (!state.user) return;
+    const v = cur().view;
+    if (LIVE_VIEWS.has(v)) render();
+    else if (ENTRY_VIEWS.has(v) && !document.activeElement?.matches?.("input, textarea, select") && !document.body.classList.contains("sheet-open")) render();
+  });
 }
 
 async function ensureSeed() {
@@ -143,16 +227,20 @@ async function ensureSeed() {
       return;
     }
   }
-  if (snap?.exists()) { state.setupMsg = null; return; }
+  const putAll = (batch, coll, items) => items.forEach(({ id, ...data }) => batch.set(doc(db, coll, id), data));
+  if (snap?.exists()) {
+    state.setupMsg = null;
+    if ((snap.data().seedVersion || 1) < 2) {
+      const batch = writeBatch(db);
+      putAll(batch, "lists", DEFAULT_TAGS);
+      batch.set(metaRef, { seedVersion: 2 }, { merge: true });
+      batch.commit().catch(onWriteError);
+    }
+    return;
+  }
   const batch = writeBatch(db);
-  for (const c of buildDefaultCategories()) {
-    const { id, ...data } = c;
-    batch.set(doc(db, "categories", id), data);
-  }
-  for (const m of DEFAULT_PAYMENT_METHODS) {
-    const { id, ...data } = m;
-    batch.set(doc(db, "lists", id), data);
-  }
+  putAll(batch, "categories", buildDefaultCategories());
+  putAll(batch, "lists", [...DEFAULT_PAYMENT_METHODS, ...DEFAULT_TAGS]);
   batch.set(metaRef, { seedVersion: SEED_VERSION, seededAt: serverTimestamp(), seededBy: state.user?.uid || null });
   batch.commit().catch(onWriteError);
 }
@@ -173,26 +261,50 @@ function onWriteError(err) {
   toast(msg, { error: true, ms: 10000 });
 }
 
-window.addEventListener("online", () => { state.online = true; if (state.view === "home") render(); });
-window.addEventListener("offline", () => { state.online = false; if (state.view === "home") render(); });
+window.addEventListener("online", () => { state.online = true; dataChanged(); });
+window.addEventListener("offline", () => { state.online = false; dataChanged(); });
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible" && state.user) {
-    subscribeMonth();
-    if (state.view === "home") render();
-  }
+  if (document.visibilityState === "visible" && state.user) { subscribeMonth(); dataChanged(); }
 });
 
 /* ---------- rendering ---------- */
 function render() {
-  document.body.classList.toggle("has-savebar", !!state.user && state.view !== "home");
+  const v = cur().view;
+  const isTab = TABS.includes(v);
+  document.body.classList.toggle("has-savebar", !!state.user && ENTRY_VIEWS.has(v));
+  document.body.classList.toggle("has-tabbar", !!state.user && isTab);
   if (!state.authReady) { $app.innerHTML = `<div class="splash">Loading…</div>`; return; }
   if (!state.user) { renderLogin(); return; }
-  if (state.view === "sale") renderSale();
-  else if (state.view === "expense") renderExpense();
-  else renderHome();
+
+  // keep the cursor in the same box after a redraw
+  const a = document.activeElement;
+  const keep = a && a.id && $app.contains(a) ? { id: a.id, s: a.selectionStart, e: a.selectionEnd } : null;
+
+  const views = {
+    home: renderHome, clients: renderClients, suppliers: renderSuppliers, settings: renderSettings,
+    client: renderClient, supplier: renderSupplier, clientForm: renderClientForm, supplierForm: renderSupplierForm,
+    sale: renderSale, expense: renderExpense, payment: renderPayment, supplierPay: renderSupplierPay,
+    categories: renderCategories, lists: renderLists, business: renderBusiness
+  };
+  (views[v] || renderHome)();
+  if (isTab) $app.insertAdjacentHTML("beforeend", tabbar(v));
+
+  if (keep) {
+    const el = document.getElementById(keep.id);
+    if (el) { el.focus(); try { el.setSelectionRange(keep.s, keep.e); } catch { /* not a text box */ } }
+  }
+}
+
+function tabbar(active) {
+  const tabs = [["home", "⌂", "Home"], ["clients", "☺", "Clients"], ["suppliers", "▤", "Suppliers"], ["settings", "⚙", "Settings"]];
+  return `<nav class="tabbar" aria-label="Sections">${tabs.map(([id, icon, label]) => `
+    <button class="tab ${id === active ? "on" : ""}" data-act="tab" data-tab="${id}" ${id === active ? 'aria-current="page"' : ""}>
+      <span class="tab-icon" aria-hidden="true">${icon}</span><span>${label}</span>
+    </button>`).join("")}</nav>`;
 }
 
 function renderLogin(errorText = "") {
+  document.body.classList.remove("has-savebar", "has-tabbar");
   $app.innerHTML = `
   <section class="login">
     <img src="icons/icon-192.png" alt="" class="login-logo" width="72" height="72">
@@ -200,7 +312,7 @@ function renderLogin(errorText = "") {
     <p class="muted">Sign in with the owner account.</p>
     <form id="login-form" class="stack" novalidate>
       <label class="field"><span>Email</span>
-        <input type="email" name="email" autocomplete="username" required inputmode="email"></label>
+        <input type="email" name="email" autocomplete="username" required inputmode="email" autocapitalize="off"></label>
       <label class="field"><span>Password</span>
         <input type="password" name="password" autocomplete="current-password" required></label>
       <p class="error" role="alert">${esc(errorText)}</p>
@@ -229,6 +341,16 @@ function renderLogin(errorText = "") {
   });
 }
 
+/* ---------- shared bits ---------- */
+function topbar(title, { back = true, right = "" } = {}) {
+  return `
+  <header class="topbar sub">
+    ${back ? `<button class="icon-btn" data-act="back" aria-label="Back">←</button>` : `<span class="icon-spacer"></span>`}
+    <h1>${esc(title)}</h1>
+    ${right || `<span class="icon-spacer"></span>`}
+  </header>`;
+}
+
 function statusBanner() {
   if (state.setupMsg) return `<div class="banner warn">${esc(state.setupMsg)}</div>`;
   const n = state.pendingCount;
@@ -239,6 +361,76 @@ function statusBanner() {
   return "";
 }
 
+function backupBanner() {
+  if (!state.categories.length) return "";
+  if (state.backupMeta?.lastDate === localDateStr()) return "";
+  const last = state.backupMeta?.lastDate ? `Last backup: ${niceDate(state.backupMeta.lastDate, true)}.` : "No backup saved yet.";
+  return `<div class="banner backup"><span>Today's backup isn't saved yet. <span class="muted small">${esc(last)}</span></span>
+    <button class="btn small-btn" data-act="backup">Back up</button></div>`;
+}
+
+const KIND = {
+  sale: { cls: "income", badge: "↑", sign: "+ " },
+  expense: { cls: "expense", badge: "↓", sign: "− " },
+  clientPayment: { cls: "transfer", badge: "⇩", sign: "" },
+  supplierPayment: { cls: "transfer out", badge: "⇧", sign: "" }
+};
+
+function txnTitle(t) {
+  if (t.kind === "sale") return t.clientName || "Sale";
+  if (t.kind === "expense") return t.label || catById(t.subCategoryId || t.categoryId)?.name || "Expense";
+  if (t.kind === "clientPayment") return t.clientName || "Payment received";
+  if (t.kind === "supplierPayment") return t.supplierName || "Supplier payment";
+  return t.kind;
+}
+// In a client's or supplier's history the name is already the page title,
+// so rows show what happened instead.
+function historyTitle(t) {
+  if (t.kind === "sale") return (t.items || []).map((i) => i.name).join(", ") || "Sale";
+  if (t.kind === "clientPayment") return "Payment received";
+  if (t.kind === "supplierPayment") return "Payment to supplier";
+  return txnTitle(t);
+}
+function txnDetail(t, { withDate = false } = {}) {
+  const parts = [];
+  if (withDate) parts.push(niceDate(t.date));
+  if (t.kind === "sale" && !withDate) parts.push((t.items || []).map((i) => i.name).join(", "));
+  if (t.kind === "expense" && t.supplierName && !withDate) parts.push(t.supplierName);
+  if (t.kind === "expense" && t.note && !withDate) parts.push(t.note);
+  if (t.kind === "clientPayment" && !withDate) parts.push("Payment received");
+  if (t.kind === "supplierPayment" && !withDate) parts.push("Paid to supplier");
+  const m = t.paidNow ? methodName(t.paymentMethodId) : "";
+  if (m) parts.push(m);
+  return parts.filter(Boolean).join(" · ");
+}
+function dueText(t) {
+  if (t.kind !== "sale" && t.kind !== "expense") return "";
+  const due = toRupees(t.total) - toRupees(t.paidNow) - toRupees(t.advanceUsed || 0);
+  if (due <= 0) return "";
+  return t.kind === "sale" ? `${formatRs(due)} due` : `${formatRs(due)} on credit`;
+}
+function createdMs(t) {
+  const c = t.createdAt;
+  return c?.toMillis ? c.toMillis() : (typeof c === "number" ? c : 0);
+}
+
+function txnRow(t, opts = {}) {
+  const k = KIND[t.kind] || KIND.sale;
+  const due = dueText(t);
+  return `
+  <li>
+    <button class="txn ${k.cls}" data-act="open-txn" data-id="${esc(t.id)}">
+      <span class="txn-badge" aria-hidden="true">${k.badge}</span>
+      <span class="txn-main">
+        <span class="txn-title">${esc(opts.withDate ? historyTitle(t) : txnTitle(t))}</span>
+        <span class="txn-sub">${esc(txnDetail(t, opts))}${due ? ` <span class="due">· ${esc(due)}</span>` : ""}${t._pending ? ` <span class="pending">· waiting to sync</span>` : ""}</span>
+      </span>
+      <span class="txn-amt">${k.sign}${formatRs(t.total)}</span>
+    </button>
+  </li>`;
+}
+
+/* ---------- home ---------- */
 function totalsCard(title, t, sub) {
   const profitCls = t.profit < 0 ? "neg" : "pos";
   return `
@@ -252,22 +444,22 @@ function totalsCard(title, t, sub) {
   </article>`;
 }
 
-function txnTitle(t) {
-  if (t.kind === "sale") return t.clientName || "Sale";
-  if (t.kind === "expense") return t.label || catById(t.subCategoryId || t.categoryId)?.name || "Expense";
-  return t.kind;
-}
-function txnDetail(t) {
-  const parts = [];
-  if (t.kind === "sale") parts.push((t.items || []).map((i) => i.name).join(", "));
-  if (t.kind === "expense" && t.note) parts.push(t.note);
-  const m = methodName(t.paymentMethodId);
-  if (m) parts.push(m);
-  return parts.filter(Boolean).join(" · ");
-}
-function createdMs(t) {
-  const c = t.createdAt;
-  return c?.toMillis ? c.toMillis() : (typeof c === "number" ? c : 0);
+function balancesCard() {
+  const b = balanceSummary(state.clients, state.suppliers);
+  return `
+  <article class="card owed">
+    <header><h2>Money owed</h2></header>
+    <button class="owed-row" data-act="owed-clients">
+      <span>Clients owe you${b.owedCount ? ` <span class="muted small">(${b.owedCount})</span>` : ""}</span>
+      <strong class="${b.owed ? "warn-text" : ""}">${formatRs(b.owed)}</strong><span class="chev" aria-hidden="true">›</span>
+    </button>
+    <button class="owed-row" data-act="owed-advances">
+      <span>Advances you're holding</span><strong>${formatRs(b.advances)}</strong><span class="chev" aria-hidden="true">›</span>
+    </button>
+    <button class="owed-row" data-act="tab" data-tab="suppliers">
+      <span>You owe suppliers</span><strong class="${b.weOwe ? "expense-text" : ""}">${formatRs(b.weOwe)}</strong><span class="chev" aria-hidden="true">›</span>
+    </button>
+  </article>`;
 }
 
 function renderHome() {
@@ -277,54 +469,506 @@ function renderHome() {
   $app.innerHTML = `
   <header class="topbar">
     <div>
-      <p class="eyebrow">Parlour Accounts</p>
+      <p class="eyebrow">${esc(state.business.name || "Parlour Accounts")}</p>
       <h1>${esc(niceDate(today, true))}</h1>
     </div>
-    <button class="icon-btn" data-act="menu" aria-label="Menu">⋯</button>
   </header>
   ${statusBanner()}
+  ${backupBanner()}
   <div class="home-grid">
     <div class="actions">
       <button class="big income" data-act="new-sale"><span class="big-sign" aria-hidden="true">+</span>New sale</button>
       <button class="big expense" data-act="new-expense"><span class="big-sign" aria-hidden="true">−</span>New expense</button>
+      <button class="big soft" data-act="receive-payment"><span class="big-sign" aria-hidden="true">⇩</span>Receive payment</button>
+      <button class="big soft" data-act="pay-supplier"><span class="big-sign" aria-hidden="true">⇧</span>Pay supplier</button>
     </div>
     <section class="totals-grid">
       ${totalsCard("Today", day)}
       ${totalsCard("This month", month, monthName(today))}
+      ${balancesCard()}
     </section>
     <section class="today-list">
       <h2 class="section-title">Today's entries <span class="muted small">${todays.length || ""}</span></h2>
-      ${todays.length ? `<ul class="txn-list">${todays.map(txnRow).join("")}</ul>`
+      ${todays.length ? `<ul class="txn-list">${todays.map((t) => txnRow(t)).join("")}</ul>`
         : `<div class="empty"><p>No entries yet today.</p><p class="muted small">Tap <strong>New sale</strong> or <strong>New expense</strong> to add one.</p></div>`}
     </section>
   </div>`;
 }
 
-function txnRow(t) {
-  const isSale = t.kind === "sale";
-  return `
-  <li>
-    <button class="txn ${isSale ? "income" : "expense"}" data-act="open-txn" data-id="${esc(t.id)}">
-      <span class="txn-badge" aria-hidden="true">${isSale ? "↑" : "↓"}</span>
-      <span class="txn-main">
-        <span class="txn-title">${esc(txnTitle(t))}</span>
-        <span class="txn-sub">${esc(txnDetail(t))}${t._pending ? ` <span class="pending">· waiting to sync</span>` : ""}</span>
-      </span>
-      <span class="txn-amt">${isSale ? "+" : "−"} ${formatRs(t.total)}</span>
-    </button>
-  </li>`;
+/* ---------- clients ---------- */
+function clientFilterMatch(c, f) {
+  if (!f) return true;
+  if (f === "owes") return toRupees(c.balance) > 0;
+  if (f === "advance") return toRupees(c.balance) < 0;
+  if (f.startsWith("tag:")) return (c.tagIds || []).includes(f.slice(4));
+  if (f.startsWith("area:")) return c.areaId === f.slice(5);
+  return true;
+}
+function filteredClients() {
+  const f = state.ui.clientFilter;
+  let list = state.clients.filter((c) => clientFilterMatch(c, f));
+  const q = state.ui.clientQ.trim();
+  if (q) list = searchClients(list, q, 500);
+  if (f === "owes") list = [...list].sort((a, b) => toRupees(b.balance) - toRupees(a.balance));
+  if (f === "advance") list = [...list].sort((a, b) => toRupees(a.balance) - toRupees(b.balance));
+  return list;
+}
+function clientRowsHtml() {
+  const list = filteredClients();
+  if (!state.clients.length) return `<div class="empty"><p>No clients yet.</p><p class="muted small">Clients you add during a sale appear here too.</p></div>`;
+  if (!list.length) return `<p class="muted pad">No clients match.</p>`;
+  return `<ul class="people">${list.map((c) => {
+    const bt = clientBalanceText(c.balance);
+    const sub = [prettyPhone(c.phone), listName(c.areaId)].filter(Boolean).join(" · ");
+    return `<li><button class="person" data-act="open-client" data-id="${esc(c.id)}">
+      <span class="avatar" aria-hidden="true">${esc((c.name || "?").trim().charAt(0).toUpperCase())}</span>
+      <span class="person-main"><strong>${esc(c.name)}</strong><span class="muted small">${esc(sub || "No phone")}</span></span>
+      ${bt.cls !== "settled" ? `<span class="bal ${bt.cls}">${esc(bt.text)}</span>` : ""}
+    </button></li>`;
+  }).join("")}</ul>`;
+}
+function renderClients() {
+  const f = state.ui.clientFilter;
+  const chip = (id, label) => `<button class="chip small-chip ${f === id ? "on" : ""}" data-act="client-filter" data-id="${esc(id || "")}" aria-pressed="${f === id}">${esc(label)}</button>`;
+  $app.innerHTML = `
+  <header class="topbar">
+    <div><p class="eyebrow">${state.clients.length} clients</p><h1>Clients</h1></div>
+    <button class="btn primary" data-act="add-client">+ Add</button>
+  </header>
+  <input type="search" id="clients-q" class="search" placeholder="Search name or phone" value="${esc(state.ui.clientQ)}" autocomplete="off" aria-label="Search clients">
+  <div class="filter-row" role="group" aria-label="Filter clients">
+    ${chip(null, "All")}${chip("owes", "Owe money")}${chip("advance", "Advance")}
+    ${listOf("tag").map((t) => chip("tag:" + t.id, t.name)).join("")}
+    ${listOf("area").map((a) => chip("area:" + a.id, a.name)).join("")}
+  </div>
+  <div id="client-list" class="list-pad">${clientRowsHtml()}</div>`;
+  const q = document.getElementById("clients-q");
+  q.addEventListener("input", () => {
+    state.ui.clientQ = q.value;
+    document.getElementById("client-list").innerHTML = clientRowsHtml();
+  });
 }
 
-/* ---------- shared entry-screen parts ---------- */
-function entryHeader(title) {
-  return `
-  <header class="topbar sub">
-    <button class="icon-btn" data-act="back" aria-label="Back">←</button>
-    <h1>${esc(title)}</h1>
-    <span></span>
-  </header>`;
+function historyHtml(emptyText) {
+  const list = [...state.profileTxns].sort(byNewest);
+  if (!list.length) return `<div class="empty"><p>${esc(emptyText)}</p></div>`;
+  return `<ul class="txn-list">${list.map((t) => txnRow(t, { withDate: true })).join("")}</ul>`;
 }
 
+function renderClient() {
+  const c = clientById(cur().params.id);
+  if (!c) {
+    $app.innerHTML = `${topbar("Client")}<div class="empty"><p>This client was not found (it may have been deleted).</p></div>`;
+    return;
+  }
+  const bal = toRupees(c.balance);
+  const bt = clientBalanceText(bal);
+  const tags = (c.tagIds || []).map(listName).filter(Boolean);
+  const canDelete = !state.profileTxns.length && bal === 0;
+  $app.innerHTML = `
+  ${topbar(c.name, { right: `<button class="btn ghost" data-act="edit-client" data-id="${esc(c.id)}">Edit</button>` })}
+  <div class="profile">
+    <article class="card balance-card ${bt.cls}">
+      <p class="muted small">${bal > 0 ? "Owes you" : bal < 0 ? "Advance held" : "Balance"}</p>
+      <p class="bal-big">${bal === 0 ? "Settled" : formatRs(Math.abs(bal))}</p>
+      <div class="row-btns">
+        <button class="btn ghost" data-act="sale-for-client" data-id="${esc(c.id)}">New sale</button>
+        <button class="btn primary" data-act="pay-from-client" data-id="${esc(c.id)}">Receive payment</button>
+      </div>
+    </article>
+    <article class="card">
+      <dl class="details">
+        <div><dt>Phone</dt><dd>${c.phone ? `${esc(prettyPhone(c.phone))} <a class="link" href="tel:${esc(c.phone)}">Call</a>` : "—"}</dd></div>
+        ${c.areaId ? `<div><dt>Area</dt><dd>${esc(listName(c.areaId))}</dd></div>` : ""}
+        ${birthdayText(c.birthday) ? `<div><dt>Birthday</dt><dd>${esc(birthdayText(c.birthday))}</dd></div>` : ""}
+        ${tags.length ? `<div><dt>Tags</dt><dd>${tags.map((t) => `<span class="tag">${esc(t)}</span>`).join(" ")}</dd></div>` : ""}
+        <div><dt>WhatsApp offers</dt><dd>${c.whatsappConsent === false ? "No" : "Yes, agreed"}</dd></div>
+        ${c.notes ? `<div><dt>Notes</dt><dd>${esc(c.notes)}</dd></div>` : ""}
+      </dl>
+    </article>
+    <section>
+      <h2 class="section-title">History <span class="muted small">${state.profileTxns.length || ""}</span></h2>
+      ${historyHtml("No visits or payments yet.")}
+    </section>
+    ${canDelete ? `<button class="btn ghost danger block" data-act="delete-client" data-id="${esc(c.id)}">Delete client</button>` : ""}
+  </div>`;
+}
+
+/* client form (add / edit) */
+function openClientForm(id = null) {
+  const c = id ? clientById(id) : null;
+  const m = /^\+92(\d{10})$/.exec(c?.phone || "");
+  go("clientForm", { id }, {
+    name: c?.name || "",
+    code: c?.phone ? (m ? "+92" : (c.phone.match(/^\+\d{1,3}/)?.[0] || "+92")) : "+92",
+    phone: c?.phone ? (m ? m[1] : c.phone.replace(/^\+\d{1,3}/, "")) : "",
+    areaId: c?.areaId || null,
+    bday: { day: c?.birthday?.day || "", month: c?.birthday?.month || "", year: c?.birthday?.year || "" },
+    tagIds: [...(c?.tagIds || [])],
+    notes: c?.notes || "",
+    consent: c ? c.whatsappConsent !== false : true,
+    error: "", dupId: null
+  });
+}
+
+function pickerWithAdd(kind, selected, { multi = false, label }) {
+  const items = listOf(kind);
+  const isOn = (id) => (multi ? selected.includes(id) : selected === id);
+  return `
+  <div class="chips" role="group" aria-label="${esc(label)}">${items.map((i) => `
+    <button type="button" class="chip ${isOn(i.id) ? "on" : ""}" data-act="form-pick" data-kind="${kind}" data-id="${esc(i.id)}" aria-pressed="${isOn(i.id)}">${esc(i.name)}</button>`).join("")}
+    <button type="button" class="chip add-chip" data-act="form-add-list" data-kind="${kind}">+ New</button>
+  </div>`;
+}
+
+function renderClientForm() {
+  const d = D();
+  const editing = !!cur().params.id;
+  const days = Array.from({ length: 31 }, (_, i) => i + 1);
+  $app.innerHTML = `
+  ${topbar(editing ? "Edit client" : "New client")}
+  <div class="entry">
+    <section class="block stack">
+      <label class="field"><span>Name</span>
+        <input type="text" id="cf-name" maxlength="60" value="${esc(d.name)}" autocomplete="off"></label>
+      <div class="field"><span>Phone <span class="muted">(optional)</span></span>
+        <div class="phone-row">
+          <input type="text" id="cf-code" value="${esc(d.code)}" inputmode="tel" aria-label="Country code" class="cc">
+          <input type="tel" id="cf-phone" value="${esc(d.phone)}" inputmode="numeric" placeholder="300 1234567" aria-label="Phone number">
+        </div>
+      </div>
+      <p class="error" role="alert">${esc(d.error)}</p>
+      ${d.dupId ? `<button type="button" class="btn ghost block" data-act="open-client" data-id="${esc(d.dupId)}">Open the saved client</button>` : ""}
+    </section>
+    <section class="block">
+      <h2>Area <span class="muted small">(optional)</span></h2>
+      ${pickerWithAdd("area", d.areaId, { label: "Area" })}
+    </section>
+    <section class="block">
+      <h2>Tags <span class="muted small">(optional)</span></h2>
+      ${pickerWithAdd("tag", d.tagIds, { multi: true, label: "Tags" })}
+    </section>
+    <section class="block">
+      <h2>Birthday <span class="muted small">(optional)</span></h2>
+      <div class="bday-row">
+        <select id="cf-day" aria-label="Day"><option value="">Day</option>${days.map((n) => `<option ${String(d.bday.day) === String(n) ? "selected" : ""}>${n}</option>`).join("")}</select>
+        <select id="cf-month" aria-label="Month"><option value="">Month</option>${MONTHS.map((mn, i) => `<option value="${i + 1}" ${String(d.bday.month) === String(i + 1) ? "selected" : ""}>${mn}</option>`).join("")}</select>
+        <input type="text" id="cf-year" inputmode="numeric" maxlength="4" placeholder="Year" value="${esc(d.bday.year)}" aria-label="Year (optional)">
+      </div>
+    </section>
+    <section class="block stack">
+      <label class="field"><span>Notes <span class="muted">(optional)</span></span>
+        <textarea id="cf-notes" maxlength="300" rows="3" placeholder="e.g. prefers organic products">${esc(d.notes)}</textarea></label>
+      <label class="toggle"><input type="checkbox" id="cf-consent" ${d.consent ? "checked" : ""}>
+        <span>Agreed to receive offers on WhatsApp</span></label>
+    </section>
+  </div>
+  <footer class="savebar">
+    <div class="sum"><span class="muted small">${editing ? "Editing" : "New client"}</span><strong>${esc(d.name || "—")}</strong></div>
+    <button class="btn primary" data-act="save-client-form">Save client</button>
+  </footer>`;
+  const bind = (id, fn, ev = "input") => document.getElementById(id)?.addEventListener(ev, (e) => fn(e.target));
+  bind("cf-name", (el) => { d.name = el.value; $app.querySelector(".savebar strong").textContent = el.value || "—"; });
+  bind("cf-code", (el) => { d.code = el.value; });
+  bind("cf-phone", (el) => { d.phone = el.value; });
+  bind("cf-day", (el) => { d.bday.day = el.value; }, "change");
+  bind("cf-month", (el) => { d.bday.month = el.value; }, "change");
+  bind("cf-year", (el) => { d.bday.year = el.value; });
+  bind("cf-notes", (el) => { d.notes = el.value; });
+  bind("cf-consent", (el) => { d.consent = el.checked; }, "change");
+  if (!editing && !d.name) document.getElementById("cf-name").focus();
+}
+
+function saveClientForm() {
+  const d = D();
+  const id = cur().params.id;
+  const name = d.name.trim().replace(/\s+/g, " ");
+  const fail = (msg, dupId = null) => { d.error = msg; d.dupId = dupId; render(); window.scrollTo(0, 0); };
+  if (!name) return fail("Enter the client's name.");
+  const p = normalizePhone(d.code, d.phone);
+  if (!p.ok) return fail(p.error);
+  if (p.phone) {
+    const dup = state.clients.find((c) => c.phone === p.phone && c.id !== id);
+    if (dup) return fail(`This number is already saved for ${dup.name}.`, dup.id);
+  }
+  const day = Number(d.bday.day) || null, month = Number(d.bday.month) || null;
+  const year = /^\d{4}$/.test(String(d.bday.year).trim()) ? Number(d.bday.year) : null;
+  if ((day && !month) || (!day && month)) return fail("For the birthday, pick both day and month (or neither).");
+  const data = {
+    name, nameLower: name.toLowerCase(), phone: p.phone,
+    areaId: d.areaId || null,
+    birthday: day && month ? { day, month, year } : null,
+    tagIds: d.tagIds, notes: d.notes.trim(),
+    whatsappConsent: !!d.consent
+  };
+  const before = id ? clientById(id) : null;
+  if (!before || before.whatsappConsent !== data.whatsappConsent) data.consentUpdatedAt = serverTimestamp();
+  if (id) {
+    updateDoc(doc(db, "clients", id), data).catch(onWriteError);
+    toast("Client updated.");
+  } else {
+    const ref = doc(collection(db, "clients"));
+    setDoc(ref, { ...data, balance: 0, active: true, createdAt: serverTimestamp(), createdBy: state.user.uid }).catch(onWriteError);
+    toast("Client saved.");
+  }
+  goBack();
+}
+
+function newClientDoc(name, phone) {
+  const ref = doc(collection(db, "clients"));
+  setDoc(ref, {
+    name, nameLower: name.toLowerCase(), phone,
+    areaId: null, birthday: null, tagIds: [], notes: "",
+    balance: 0, active: true, whatsappConsent: true,
+    consentUpdatedAt: serverTimestamp(), createdAt: serverTimestamp(),
+    createdBy: state.user.uid
+  }).catch(onWriteError); // not awaited: works offline
+  return ref.id;
+}
+
+/* ---------- suppliers ---------- */
+function renderSuppliers() {
+  const list = state.suppliers.filter((s) => s.active !== false);
+  const total = list.reduce((s, x) => s + Math.max(0, toRupees(x.balanceOwed)), 0);
+  $app.innerHTML = `
+  <header class="topbar">
+    <div><p class="eyebrow">You owe ${formatRs(total)}</p><h1>Suppliers</h1></div>
+    <button class="btn primary" data-act="add-supplier">+ Add</button>
+  </header>
+  <div class="list-pad">
+  ${list.length ? `<ul class="people">${list.map((s) => {
+    const owed = toRupees(s.balanceOwed);
+    return `<li><button class="person" data-act="open-supplier" data-id="${esc(s.id)}">
+      <span class="avatar sup" aria-hidden="true">${esc((s.name || "?").trim().charAt(0).toUpperCase())}</span>
+      <span class="person-main"><strong>${esc(s.name)}</strong><span class="muted small">${esc(prettyPhone(s.phone) || "No phone")}</span></span>
+      ${owed > 0 ? `<span class="bal weowe">You owe ${formatRs(owed)}</span>` : ""}
+    </button></li>`;
+  }).join("")}</ul>` : `<div class="empty"><p>No suppliers yet.</p><p class="muted small">Add the shops you buy products from, so you can record buying on credit.</p></div>`}
+  </div>`;
+}
+
+function renderSupplier() {
+  const s = supplierById(cur().params.id);
+  if (!s) { $app.innerHTML = `${topbar("Supplier")}<div class="empty"><p>This supplier was not found.</p></div>`; return; }
+  const owed = toRupees(s.balanceOwed);
+  const canDelete = !state.profileTxns.length && owed === 0;
+  $app.innerHTML = `
+  ${topbar(s.name, { right: `<button class="btn ghost" data-act="edit-supplier" data-id="${esc(s.id)}">Edit</button>` })}
+  <div class="profile">
+    <article class="card balance-card ${owed > 0 ? "weowe" : "settled"}">
+      <p class="muted small">${owed > 0 ? "You owe" : "Balance"}</p>
+      <p class="bal-big">${owed > 0 ? formatRs(owed) : "Settled"}</p>
+      <div class="row-btns">
+        <button class="btn ghost" data-act="expense-for-supplier" data-id="${esc(s.id)}">New expense</button>
+        <button class="btn primary" data-act="pay-this-supplier" data-id="${esc(s.id)}">Pay supplier</button>
+      </div>
+    </article>
+    <article class="card">
+      <dl class="details">
+        <div><dt>Phone</dt><dd>${s.phone ? `${esc(prettyPhone(s.phone))} <a class="link" href="tel:${esc(s.phone)}">Call</a>` : "—"}</dd></div>
+        ${s.notes ? `<div><dt>Notes</dt><dd>${esc(s.notes)}</dd></div>` : ""}
+      </dl>
+    </article>
+    <section>
+      <h2 class="section-title">History <span class="muted small">${state.profileTxns.length || ""}</span></h2>
+      ${historyHtml("No purchases or payments yet.")}
+    </section>
+    ${canDelete ? `<button class="btn ghost danger block" data-act="delete-supplier" data-id="${esc(s.id)}">Delete supplier</button>` : ""}
+  </div>`;
+}
+
+function openSupplierForm(id = null) {
+  const s = id ? supplierById(id) : null;
+  const m = /^\+92(\d{10})$/.exec(s?.phone || "");
+  go("supplierForm", { id }, {
+    name: s?.name || "",
+    code: s?.phone && !m ? (s.phone.match(/^\+\d{1,3}/)?.[0] || "+92") : "+92",
+    phone: s?.phone ? (m ? m[1] : s.phone.replace(/^\+\d{1,3}/, "")) : "",
+    notes: s?.notes || "", error: ""
+  });
+}
+function renderSupplierForm() {
+  const d = D();
+  const editing = !!cur().params.id;
+  $app.innerHTML = `
+  ${topbar(editing ? "Edit supplier" : "New supplier")}
+  <div class="entry">
+    <section class="block stack">
+      <label class="field"><span>Name</span><input type="text" id="sf-name" maxlength="60" value="${esc(d.name)}" autocomplete="off"></label>
+      <div class="field"><span>Phone <span class="muted">(optional)</span></span>
+        <div class="phone-row">
+          <input type="text" id="sf-code" value="${esc(d.code)}" inputmode="tel" aria-label="Country code" class="cc">
+          <input type="tel" id="sf-phone" value="${esc(d.phone)}" inputmode="numeric" placeholder="300 1234567" aria-label="Phone number">
+        </div>
+      </div>
+      <label class="field"><span>Notes <span class="muted">(optional)</span></span>
+        <textarea id="sf-notes" maxlength="300" rows="3">${esc(d.notes)}</textarea></label>
+      <p class="error" role="alert">${esc(d.error)}</p>
+    </section>
+  </div>
+  <footer class="savebar">
+    <div class="sum"><span class="muted small">Supplier</span><strong>${esc(d.name || "—")}</strong></div>
+    <button class="btn primary" data-act="save-supplier-form">Save supplier</button>
+  </footer>`;
+  const bind = (id, k) => document.getElementById(id).addEventListener("input", (e) => { d[k] = e.target.value; });
+  bind("sf-name", "name"); bind("sf-code", "code"); bind("sf-phone", "phone"); bind("sf-notes", "notes");
+  if (!editing && !d.name) document.getElementById("sf-name").focus();
+}
+function saveSupplierForm() {
+  const d = D();
+  const id = cur().params.id;
+  const name = d.name.trim().replace(/\s+/g, " ");
+  if (!name) { d.error = "Enter the supplier's name."; render(); return; }
+  const p = normalizePhone(d.code, d.phone);
+  if (!p.ok) { d.error = p.error; render(); return; }
+  const data = { name, nameLower: name.toLowerCase(), phone: p.phone, notes: d.notes.trim() };
+  if (id) updateDoc(doc(db, "suppliers", id), data).catch(onWriteError);
+  else setDoc(doc(collection(db, "suppliers")), { ...data, balanceOwed: 0, active: true, createdAt: serverTimestamp(), createdBy: state.user.uid }).catch(onWriteError);
+  toast(id ? "Supplier updated." : "Supplier saved.");
+  goBack();
+}
+function newSupplierDoc(name, phone) {
+  const ref = doc(collection(db, "suppliers"));
+  setDoc(ref, { name, nameLower: name.toLowerCase(), phone, notes: "", balanceOwed: 0, active: true, createdAt: serverTimestamp(), createdBy: state.user.uid }).catch(onWriteError);
+  return ref.id;
+}
+
+/* ---------- settings ---------- */
+function renderSettings() {
+  const n = state.pendingCount;
+  const last = state.backupMeta?.lastDate ? niceDate(state.backupMeta.lastDate, true) : "never";
+  const row = (act, title, sub, extra = "") => `
+    <button class="set-row" data-act="${act}" ${extra}><span><strong>${esc(title)}</strong><span class="muted small">${esc(sub)}</span></span><span class="chev" aria-hidden="true">›</span></button>`;
+  $app.innerHTML = `
+  <header class="topbar"><div><p class="eyebrow">Parlour Accounts</p><h1>Settings</h1></div></header>
+  <div class="settings">
+    <section class="card set-group">
+      ${row("open-business", "Business details", state.business.name ? `${state.business.name} · shown on receipts` : "Name, phone and address for receipts")}
+      ${row("open-categories", "Categories", "Services and expense types")}
+      ${row("open-list", "Payment methods", listOf("paymentMethod").map((m) => m.name).join(", "), 'data-kind="paymentMethod"')}
+      ${row("open-list", "Client tags", listOf("tag").map((m) => m.name).join(", ") || "None yet", 'data-kind="tag"')}
+      ${row("open-list", "Areas", listOf("area").map((m) => m.name).join(", ") || "None yet", 'data-kind="area"')}
+    </section>
+    <section class="card set-group">
+      <div class="set-info"><strong>Backup</strong><span class="muted small">Last backup: ${esc(last)}. Saves a copy of all data as one file you can keep in Google Drive.</span></div>
+      <button class="btn primary block" data-act="backup">Save backup now</button>
+    </section>
+    <section class="card set-group">
+      <div class="set-info"><strong>Account</strong><span class="muted small">Signed in as ${esc(state.user?.email || "")}</span></div>
+      ${n ? `<p class="warn-text small">${n} ${n === 1 ? "entry hasn't" : "entries haven't"} synced yet. Connect to the internet before signing out.</p>` : ""}
+      <button class="btn ghost danger block" data-act="sign-out">Sign out</button>
+    </section>
+    <p class="muted small center">Stage 2 · version ${esc(APP_VERSION)}</p>
+  </div>`;
+}
+
+function renderBusiness() {
+  const d = D();
+  const f = (id, label, key, ph, max = 80) => `
+    <label class="field"><span>${label}</span><input type="text" id="${id}" maxlength="${max}" value="${esc(d[key])}" placeholder="${esc(ph)}"></label>`;
+  $app.innerHTML = `
+  ${topbar("Business details")}
+  <div class="entry">
+    <section class="block stack">
+      <p class="muted small">These appear at the top of every receipt you share.</p>
+      ${f("bz-name", "Parlour name", "name", "e.g. Hina's Beauty Lounge", 60)}
+      ${f("bz-phone", "Phone", "phone", "e.g. 0300 1234567", 30)}
+      ${f("bz-address", "Address", "address", "e.g. Shop 4, Block 2, Gulshan, Karachi", 90)}
+      ${f("bz-footer", "Message at the bottom of receipts", "footer", "e.g. Thank you! See you again.", 80)}
+    </section>
+  </div>
+  <footer class="savebar">
+    <div class="sum"><span class="muted small">Receipt header</span><strong>${esc(d.name || "—")}</strong></div>
+    <button class="btn primary" data-act="save-business">Save</button>
+  </footer>`;
+  for (const [id, key] of [["bz-name", "name"], ["bz-phone", "phone"], ["bz-address", "address"], ["bz-footer", "footer"]]) {
+    document.getElementById(id).addEventListener("input", (e) => { d[key] = e.target.value; });
+  }
+}
+
+/* categories manager */
+function renderCategories() {
+  const type = state.ui.catType;
+  const all = state.categories.filter((c) => c.type === type);
+  const ms = all.filter((c) => !c.parentId).sort(byOrder);
+  const subs = (id) => all.filter((c) => c.parentId === id).sort(byOrder);
+  const item = (c, isMain) => `
+    <li class="cat-item ${c.active === false ? "hidden-item" : ""}">
+      <span>${esc(c.name)}${c.active === false ? ` <span class="muted small">(hidden)</span>` : ""}</span>
+      <button class="icon-btn small" data-act="cat-menu" data-id="${esc(c.id)}" aria-label="Options for ${esc(c.name)}">⋯</button>
+    </li>`;
+  $app.innerHTML = `
+  ${topbar("Categories")}
+  <div class="settings">
+    <div class="chips seg" role="group" aria-label="Type">
+      <button class="chip ${type === "income" ? "on" : ""}" data-act="cat-type" data-type="income">Income (services)</button>
+      <button class="chip ${type === "expense" ? "on" : ""}" data-act="cat-type" data-type="expense">Expenses</button>
+    </div>
+    ${ms.length ? ms.map((m) => `
+    <article class="card cat-card ${m.active === false ? "hidden-item" : ""}">
+      <div class="cat-head"><strong>${esc(m.name)}</strong>${m.active === false ? `<span class="muted small">(hidden)</span>` : ""}
+        <button class="icon-btn small" data-act="cat-menu" data-id="${esc(m.id)}" aria-label="Options for ${esc(m.name)}">⋯</button></div>
+      <ul class="cat-subs">${subs(m.id).map((s) => item(s, false)).join("")}</ul>
+      <button class="btn ghost small-btn" data-act="cat-add" data-parent="${esc(m.id)}">+ Add under ${esc(m.name)}</button>
+    </article>`).join("") : `<p class="muted">Loading…</p>`}
+    <button class="btn primary block" data-act="cat-add">+ Add main category</button>
+    <p class="muted small">Hidden categories no longer appear when adding entries. Old entries keep their category.</p>
+  </div>`;
+}
+
+const LIST_TITLES = { paymentMethod: "Payment methods", tag: "Client tags", area: "Areas" };
+function renderLists() {
+  const kind = cur().params.kind;
+  const items = listOf(kind, true);
+  $app.innerHTML = `
+  ${topbar(LIST_TITLES[kind] || "List")}
+  <div class="settings">
+    <article class="card">
+      ${items.length ? `<ul class="cat-subs">${items.map((i) => `
+        <li class="cat-item ${i.active === false ? "hidden-item" : ""}">
+          <span>${esc(i.name)}${i.active === false ? ` <span class="muted small">(hidden)</span>` : ""}</span>
+          <button class="icon-btn small" data-act="list-menu" data-id="${esc(i.id)}" aria-label="Options for ${esc(i.name)}">⋯</button>
+        </li>`).join("")}</ul>` : `<p class="muted">Nothing here yet.</p>`}
+    </article>
+    <button class="btn primary block" data-act="list-add" data-kind="${esc(kind)}">+ Add</button>
+  </div>`;
+}
+
+function nextOrder(items) { return items.reduce((m, x) => Math.max(m, x.sortOrder ?? 0), -1) + 1; }
+
+function openTextSheet({ title, value = "", placeholder = "", saveLabel = "Save", onSave, extra = "" }) {
+  openSheet(`
+    <h2>${esc(title)}</h2>
+    <form id="text-sheet" class="stack">
+      <input type="text" id="ts-input" class="search" maxlength="50" value="${esc(value)}" placeholder="${esc(placeholder)}" autocomplete="off">
+      <p class="error" role="alert"></p>
+      ${extra}
+      <div class="row-btns">
+        <button type="button" class="btn ghost" data-act="close-sheet">Cancel</button>
+        <button type="submit" class="btn primary">${esc(saveLabel)}</button>
+      </div>
+    </form>`);
+  const input = document.getElementById("ts-input");
+  input.focus();
+  document.getElementById("text-sheet").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const v = input.value.trim().replace(/\s+/g, " ");
+    if (!v) { $sheet.querySelector(".error").textContent = "Enter a name."; return; }
+    const err = onSave(v);
+    if (err) { $sheet.querySelector(".error").textContent = err; return; }
+    closeSheet();
+  });
+}
+
+function itemMenu(coll, item) {
+  openTextSheet({
+    title: `Rename "${item.name}"`, value: item.name, saveLabel: "Save name",
+    extra: `<button type="button" class="btn ghost block" data-act="toggle-active" data-coll="${coll}" data-id="${esc(item.id)}">${item.active === false ? "Show again" : "Hide"}</button>`,
+    onSave: (name) => { updateDoc(doc(db, coll, item.id), { name }).catch(onWriteError); toast("Renamed."); }
+  });
+}
+
+/* ---------- entry screens: shared parts ---------- */
 function methodChips(selectedId) {
   const list = sortedMethods();
   if (!list.length) return `<p class="muted small">Loading payment methods…</p>`;
@@ -345,31 +989,25 @@ function dateAndNote(d) {
 }
 
 function bindDateAndNote() {
+  const d = D();
   const dateEl = document.getElementById("f-date");
   const noteEl = document.getElementById("f-note");
-  dateEl?.addEventListener("change", () => {
-    state.draft.date = dateEl.value || localDateStr();
-    render();
-  });
-  noteEl?.addEventListener("input", () => { state.draft.note = noteEl.value; });
+  dateEl?.addEventListener("change", () => { d.date = dateEl.value || localDateStr(); render(); });
+  noteEl?.addEventListener("input", () => { d.note = noteEl.value; });
 }
 
-/* ---------- new sale ---------- */
-function openSale() {
-  state.draft = {
-    type: "sale", client: null, search: "", newClient: null,
-    items: [], main: null, methodId: defaultMethodId(),
-    date: localDateStr(), note: "", waitingForData: true
-  };
-  state.view = "sale";
-  render();
+function baseTxn() {
+  return { createdAt: serverTimestamp(), createdByUser: state.user.uid, createdByStaff: null };
 }
 
+/* client picker (used by New sale and Receive payment) */
 function clientSection(d) {
   if (d.client) {
+    const bt = clientBalanceText(liveBalance(d.client.id));
     return `
     <div class="picked">
-      <div><strong>${esc(d.client.name)}</strong><br><span class="muted small">${esc(prettyPhone(d.client.phone) || "No phone")}</span></div>
+      <div><strong>${esc(d.client.name)}</strong><br><span class="muted small">${esc(prettyPhone(d.client.phone) || "No phone")}</span>
+        ${bt.cls !== "settled" ? `<br><span class="bal ${bt.cls}">${esc(bt.text)}</span>` : ""}</div>
       <button class="btn ghost" data-act="change-client">Change</button>
     </div>`;
   }
@@ -378,11 +1016,11 @@ function clientSection(d) {
     return `
     <form id="new-client" class="stack new-client" novalidate>
       <label class="field"><span>Name</span>
-        <input type="text" name="name" maxlength="60" value="${esc(nc.name)}" autocomplete="off" required></label>
+        <input type="text" name="name" id="nc-name" maxlength="60" value="${esc(nc.name)}" autocomplete="off" required></label>
       <div class="field"><span>Phone <span class="muted">(optional)</span></span>
         <div class="phone-row">
-          <input type="text" name="code" value="${esc(nc.code)}" inputmode="tel" aria-label="Country code" class="cc">
-          <input type="tel" name="phone" value="${esc(nc.phone)}" inputmode="numeric" placeholder="300 1234567" aria-label="Phone number">
+          <input type="text" name="code" id="nc-code" value="${esc(nc.code)}" inputmode="tel" aria-label="Country code" class="cc">
+          <input type="tel" name="phone" id="nc-phone" value="${esc(nc.phone)}" inputmode="numeric" placeholder="300 1234567" aria-label="Phone number">
         </div>
       </div>
       <p class="error" role="alert">${esc(nc.error || "")}</p>
@@ -394,7 +1032,7 @@ function clientSection(d) {
     </form>`;
   }
   const recentIds = store.get("recentClients", []);
-  const recent = recentIds.map((id) => state.clients.find((c) => c.id === id)).filter(Boolean).slice(0, 6);
+  const recent = recentIds.map((id) => clientById(id)).filter(Boolean).slice(0, 6);
   return `
   <input type="search" id="client-search" class="search" placeholder="Search name or phone" value="${esc(d.search)}" autocomplete="off" aria-label="Search clients">
   <div id="client-results">${clientResults(d.search)}</div>
@@ -407,10 +1045,102 @@ function clientResults(q) {
   if (!q.trim()) return "";
   const found = searchClients(state.clients, q);
   if (!found.length) return `<p class="muted small pad">No client found. Add a new one below.</p>`;
-  return `<ul class="results">${found.map((c) => `
-    <li><button class="result" data-act="pick-client" data-id="${esc(c.id)}">
-      <strong>${esc(c.name)}</strong><span class="muted small">${esc(prettyPhone(c.phone))}</span>
-    </button></li>`).join("")}</ul>`;
+  return `<ul class="results">${found.map((c) => {
+    const bt = clientBalanceText(c.balance);
+    return `<li><button class="result" data-act="pick-client" data-id="${esc(c.id)}">
+      <strong>${esc(c.name)}</strong><span class="muted small">${esc(prettyPhone(c.phone))}${bt.cls !== "settled" ? ` · ${esc(bt.text)}` : ""}</span>
+    </button></li>`;
+  }).join("")}</ul>`;
+}
+
+function bindClientSection() {
+  const d = D();
+  const search = document.getElementById("client-search");
+  if (search) {
+    search.addEventListener("input", () => {
+      d.search = search.value;
+      document.getElementById("client-results").innerHTML = clientResults(d.search);
+    });
+    if (d.focusSearch) { search.focus(); d.focusSearch = false; }
+  }
+  const nc = document.getElementById("new-client");
+  if (nc) {
+    if (!d.newClient.focused) { nc.name.focus(); d.newClient.focused = true; }
+    nc.addEventListener("input", () => {
+      Object.assign(d.newClient, { name: nc.name.value, code: nc.code.value, phone: nc.phone.value });
+    });
+    nc.addEventListener("submit", (e) => { e.preventDefault(); saveNewClientInline(); });
+  }
+}
+
+function saveNewClientInline() {
+  const d = D();
+  const nc = d.newClient;
+  const name = nc.name.trim().replace(/\s+/g, " ");
+  if (!name) { nc.error = "Enter the client's name."; nc.dupId = null; render(); return; }
+  const p = normalizePhone(nc.code, nc.phone);
+  if (!p.ok) { nc.error = p.error; nc.dupId = null; render(); return; }
+  if (p.phone) {
+    const dup = state.clients.find((c) => c.phone === p.phone);
+    if (dup) { nc.error = `This number is already saved for ${dup.name}.`; nc.dupId = dup.id; render(); return; }
+  }
+  const id = newClientDoc(name, p.phone);
+  d.client = { id, name, phone: p.phone };
+  d.newClient = null;
+  onClientPicked(d);
+  render();
+}
+
+function onClientPicked(d) {
+  // Receive payment: suggest the amount the client owes.
+  if (d.type === "payment" && !d.amount) {
+    const bal = liveBalance(d.client.id);
+    if (bal > 0) d.amount = String(bal);
+  }
+}
+
+/* "paid in full / part paid" block (sale & expense) */
+function payModeBlock(d, { collect, partLabel, partHint, partEnabled = true, disabledHint = "" }) {
+  const paidNow = d.payMode === "full" ? collect : Math.min(toRupees(d.partPaid), collect);
+  const remaining = collect - paidNow;
+  return `
+  <div class="chips" role="group" aria-label="How much was paid">
+    <button class="chip ${d.payMode === "full" ? "on" : ""}" data-act="pay-mode" data-mode="full" aria-pressed="${d.payMode === "full"}">Paid in full</button>
+    <button class="chip ${d.payMode === "part" ? "on" : ""}" data-act="pay-mode" data-mode="part" aria-pressed="${d.payMode === "part"}" ${partEnabled ? "" : "disabled"}>${esc(partLabel)}</button>
+  </div>
+  ${!partEnabled && disabledHint ? `<p class="muted small">${esc(disabledHint)}</p>` : ""}
+  ${d.payMode === "part" ? `
+  <div class="part-row">
+    <span>Paid now: <strong>${formatRs(paidNow)}</strong></span>
+    <button class="btn ghost" data-act="edit-part">Change</button>
+  </div>
+  ${remaining > 0 ? `<p class="due-note">${formatRs(remaining)} ${esc(partHint)}</p>` : ""}` : ""}`;
+}
+
+function openPartSheet(max, title) {
+  const d = D();
+  openPriceSheet({
+    title, initial: d.partPaid || "", doneLabel: "Done", allowZero: true, max,
+    onDone: (v) => { d.partPaid = v; render(); }
+  });
+}
+
+/* ---------- new sale ---------- */
+function openSale(clientId = null) {
+  const c = clientId ? clientById(clientId) : null;
+  go("sale", {}, {
+    type: "sale", client: c ? { id: c.id, name: c.name, phone: c.phone } : null, search: "", newClient: null,
+    items: [], main: null, methodId: defaultMethodId(), payMode: "full", partPaid: 0,
+    date: localDateStr(), note: ""
+  });
+}
+
+function saleNumbers(d) {
+  const total = itemsTotal(d.items);
+  const bal = d.client ? liveBalance(d.client.id) : 0;
+  const { advanceUsed, collect } = saleSplit(total, bal);
+  const paidNow = d.payMode === "full" ? collect : Math.min(toRupees(d.partPaid), collect);
+  return { total, bal, advanceUsed, collect, paidNow };
 }
 
 function categoryPicker(type, d, selectedSubId = null) {
@@ -433,13 +1163,12 @@ function categoryPicker(type, d, selectedSubId = null) {
 }
 
 function renderSale() {
-  const d = state.draft;
-  d.waitingForData = !mains("income").length || !sortedMethods().length;
+  const d = D();
   if (!d.methodId) d.methodId = defaultMethodId();
-  const total = itemsTotal(d.items);
-  const canSave = d.client && d.items.length && total > 0 && d.methodId;
+  const n = saleNumbers(d);
+  const canSave = d.client && d.items.length && n.total > 0 && (n.paidNow === 0 || d.methodId);
   $app.innerHTML = `
-  ${entryHeader("New sale")}
+  ${topbar("New sale")}
   <div class="entry">
     <section class="block">
       <h2>1. Client</h2>
@@ -456,107 +1185,99 @@ function renderSale() {
     </section>
     <section class="block">
       <h2>3. Payment</h2>
-      ${methodChips(d.methodId)}
+      ${n.bal > 0 ? `<p class="info warn">This client already owes ${formatRs(n.bal)} from before. Use <strong>Receive payment</strong> to collect it.</p>` : ""}
+      ${n.advanceUsed > 0 ? `<p class="info good">${formatRs(n.advanceUsed)} will be taken from the client's advance${n.collect ? `. Collect ${formatRs(n.collect)} now.` : ". Nothing to collect now."}</p>` : ""}
+      ${n.collect > 0 || !n.total ? payModeBlock(d, { collect: n.collect, partLabel: "Part paid / pay later", partHint: "will be added to what the client owes." }) : ""}
+      ${n.paidNow > 0 || !n.total ? `<p class="muted small label">Paid by</p>${methodChips(d.methodId)}` : ""}
       ${dateAndNote(d)}
     </section>
   </div>
   <footer class="savebar">
-    <div class="sum"><span class="muted small">Total</span><strong>${formatRs(total)}</strong></div>
+    <div class="sum"><span class="muted small">Total${n.total && n.paidNow !== n.total ? ` · paid now ${formatRs(n.paidNow)}` : ""}</span><strong>${formatRs(n.total)}</strong></div>
     <button class="btn primary" data-act="save-sale" ${canSave ? "" : "disabled"}>Save sale</button>
   </footer>`;
   bindDateAndNote();
-  const search = document.getElementById("client-search");
-  if (search) {
-    search.addEventListener("input", () => {
-      d.search = search.value;
-      document.getElementById("client-results").innerHTML = clientResults(d.search);
-    });
-    if (d.focusSearch) { search.focus(); d.focusSearch = false; }
-  }
-  const nc = document.getElementById("new-client");
-  if (nc) {
-    nc.name.focus();
-    nc.addEventListener("input", () => {
-      Object.assign(d.newClient, { name: nc.name.value, code: nc.code.value, phone: nc.phone.value });
-    });
-    nc.addEventListener("submit", (e) => { e.preventDefault(); saveNewClient(); });
-  }
-}
-
-function saveNewClient() {
-  const d = state.draft;
-  const nc = d.newClient;
-  const name = nc.name.trim().replace(/\s+/g, " ");
-  if (!name) { nc.error = "Enter the client's name."; nc.dupId = null; render(); return; }
-  const p = normalizePhone(nc.code, nc.phone);
-  if (!p.ok) { nc.error = p.error; nc.dupId = null; render(); return; }
-  if (p.phone) {
-    const dup = state.clients.find((c) => c.phone === p.phone);
-    if (dup) { nc.error = `This number is already saved for ${dup.name}.`; nc.dupId = dup.id; render(); return; }
-  }
-  const ref = doc(collection(db, "clients"));
-  const data = {
-    name, nameLower: name.toLowerCase(), phone: p.phone,
-    areaId: null, birthday: null, tagIds: [], notes: "",
-    balance: 0, whatsappConsent: true,
-    consentUpdatedAt: serverTimestamp(), createdAt: serverTimestamp(),
-    createdBy: state.user.uid
-  };
-  setDoc(ref, data).catch(onWriteError); // not awaited: works offline
-  d.client = { id: ref.id, name, phone: p.phone };
-  d.newClient = null;
-  render();
+  bindClientSection();
 }
 
 function saveSale() {
-  const d = state.draft;
-  const total = itemsTotal(d.items);
-  if (!d.client || !d.items.length || total <= 0) return;
+  const d = D();
+  const n = saleNumbers(d);
+  if (!d.client || !d.items.length || n.total <= 0) return;
   const ref = doc(collection(db, "transactions"));
+  const balanceDelta = n.total - n.paidNow;
   const data = {
     kind: "sale",
     clientId: d.client.id,
     clientName: d.client.name,
     items: d.items.map((it) => ({ categoryId: it.categoryId, subCategoryId: it.subCategoryId, name: it.name, price: toRupees(it.price) })),
-    total, paidNow: total,
+    total: n.total, paidNow: n.paidNow, advanceUsed: n.advanceUsed, balanceDelta,
     date: d.date,
-    paymentMethodId: d.methodId,
+    paymentMethodId: n.paidNow > 0 ? d.methodId : null,
     note: d.note.trim(),
     receiptNo: receiptNo(d.date),
-    createdAt: serverTimestamp(),
-    createdByUser: state.user.uid,
-    createdByStaff: null
+    ...baseTxn()
   };
-  setDoc(ref, data).catch(onWriteError);
+  const batch = writeBatch(db);
+  batch.set(ref, data);
+  if (balanceDelta) batch.update(doc(db, "clients", d.client.id), { balance: increment(balanceDelta) });
+  batch.commit().catch(onWriteError);
   d.items.forEach((it) => { bumpUsage(it.categoryId); bumpUsage(it.subCategoryId); });
   const prices = store.get("lastPrice", {});
   d.items.forEach((it) => { prices[it.subCategoryId || it.categoryId] = toRupees(it.price); });
   store.set("lastPrice", prices);
-  store.set("lastMethod", d.methodId);
+  if (n.paidNow > 0) store.set("lastMethod", d.methodId);
   rememberClient(d.client.id);
-  finishEntry(ref, `Sale saved: ${formatRs(total)}`);
+  const due = n.total - n.paidNow - n.advanceUsed;
+  finishEntry({ id: ref.id, ...data }, `Sale saved: ${formatRs(n.total)}${due > 0 ? ` (${formatRs(due)} due)` : ""}`);
 }
 
 /* ---------- new expense ---------- */
-function openExpense() {
-  state.draft = {
+function openExpense(supplierId = null) {
+  go("expense", {}, {
     type: "expense", main: null, sub: null, amount: "",
-    methodId: defaultMethodId(), date: localDateStr(), note: "", waitingForData: true
-  };
-  state.view = "expense";
-  render();
+    supplierId, newSupplier: null, payMode: "full", partPaid: 0,
+    methodId: defaultMethodId(), date: localDateStr(), note: ""
+  });
+}
+
+function supplierPicker(d) {
+  const list = state.suppliers.filter((s) => s.active !== false);
+  if (d.newSupplier) {
+    const ns = d.newSupplier;
+    return `
+    <form id="new-supplier" class="stack new-client" novalidate>
+      <label class="field"><span>Supplier name</span><input type="text" id="ns-name" maxlength="60" value="${esc(ns.name)}" autocomplete="off"></label>
+      <div class="field"><span>Phone <span class="muted">(optional)</span></span>
+        <div class="phone-row">
+          <input type="text" id="ns-code" value="${esc(ns.code)}" inputmode="tel" aria-label="Country code" class="cc">
+          <input type="tel" id="ns-phone" value="${esc(ns.phone)}" inputmode="numeric" placeholder="300 1234567" aria-label="Phone number">
+        </div>
+      </div>
+      <p class="error" role="alert">${esc(ns.error || "")}</p>
+      <div class="row-btns">
+        <button type="button" class="btn ghost" data-act="cancel-new-supplier">Cancel</button>
+        <button type="submit" class="btn primary">Save supplier</button>
+      </div>
+    </form>`;
+  }
+  return `
+  <div class="chips" role="group" aria-label="Supplier">${list.map((s) => `
+    <button class="chip ${s.id === d.supplierId ? "on" : ""}" data-act="pick-supplier" data-id="${esc(s.id)}" aria-pressed="${s.id === d.supplierId}">${esc(s.name)}</button>`).join("")}
+    <button class="chip add-chip" data-act="new-supplier">+ New supplier</button>
+  </div>`;
 }
 
 function renderExpense() {
-  const d = state.draft;
-  d.waitingForData = !mains("expense").length || !sortedMethods().length;
+  const d = D();
   if (!d.methodId) d.methodId = defaultMethodId();
   const needsSub = d.main && subsOf(d.main).length > 0;
   const catOk = d.main && (!needsSub || d.sub);
   const amt = toRupees(d.amount || 0);
-  const canSave = catOk && amt > 0 && d.methodId;
+  const paidNow = d.payMode === "full" ? amt : Math.min(toRupees(d.partPaid), amt);
+  const canSave = catOk && amt > 0 && (paidNow === 0 || d.methodId) && (d.payMode === "full" || d.supplierId);
   $app.innerHTML = `
-  ${entryHeader("New expense")}
+  ${topbar("New expense")}
   <div class="entry">
     <section class="block">
       <h2>1. What was it for?</h2>
@@ -567,65 +1288,295 @@ function renderExpense() {
       ${numpadHtml(d.amount)}
     </section>
     <section class="block">
-      <h2>3. Payment</h2>
-      ${methodChips(d.methodId)}
+      <h2>3. Supplier <span class="muted small">(optional)</span></h2>
+      ${supplierPicker(d)}
+    </section>
+    <section class="block">
+      <h2>4. Payment</h2>
+      ${payModeBlock(d, {
+        collect: amt, partLabel: "On credit / part paid", partHint: "will be added to what you owe this supplier.",
+        partEnabled: !!d.supplierId, disabledHint: "To buy on credit, pick or add a supplier above."
+      })}
+      ${paidNow > 0 || !amt ? `<p class="muted small label">Paid by</p>${methodChips(d.methodId)}` : ""}
       ${dateAndNote(d)}
     </section>
   </div>
   <footer class="savebar">
-    <div class="sum"><span class="muted small">Expense</span><strong class="expense-text">− ${formatRs(amt)}</strong></div>
+    <div class="sum"><span class="muted small">Expense${amt && paidNow !== amt ? ` · paid now ${formatRs(paidNow)}` : ""}</span><strong class="expense-text">− ${formatRs(amt)}</strong></div>
     <button class="btn primary" data-act="save-expense" ${canSave ? "" : "disabled"}>Save expense</button>
   </footer>`;
   bindDateAndNote();
-  bindNumpad($app.querySelector(".numpad"), d.amount, (v) => {
+  const pad = $app.querySelector(".numpad");
+  bindNumpad(pad, d.amount, (v) => {
+    const before = toRupees(d.amount || 0);
     d.amount = v;
     const a = toRupees(v || 0);
+    // the payment section depends on the amount: redraw it when it matters
+    if ((before === 0) !== (a === 0) || d.payMode === "part") { render(); return; }
     $app.querySelector(".savebar strong").textContent = "− " + formatRs(a);
-    $app.querySelector('[data-act="save-expense"]').disabled = !(catOk && a > 0 && d.methodId);
+    $app.querySelector('[data-act="save-expense"]').disabled = !(catOk && a > 0 && d.methodId && (d.payMode === "full" || d.supplierId));
   });
+  const ns = document.getElementById("new-supplier");
+  if (ns) {
+    if (!d.newSupplier.focused) { document.getElementById("ns-name").focus(); d.newSupplier.focused = true; }
+    ns.addEventListener("input", () => Object.assign(d.newSupplier, {
+      name: document.getElementById("ns-name").value, code: document.getElementById("ns-code").value, phone: document.getElementById("ns-phone").value
+    }));
+    ns.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const name = d.newSupplier.name.trim().replace(/\s+/g, " ");
+      if (!name) { d.newSupplier.error = "Enter the supplier's name."; render(); return; }
+      const p = normalizePhone(d.newSupplier.code, d.newSupplier.phone);
+      if (!p.ok) { d.newSupplier.error = p.error; render(); return; }
+      d.supplierId = newSupplierDoc(name, p.phone);
+      d.newSupplier = null;
+      render();
+    });
+  }
 }
 
 function saveExpense() {
-  const d = state.draft;
+  const d = D();
   const amt = toRupees(d.amount || 0);
   if (!d.main || amt <= 0) return;
+  const paidNow = d.payMode === "full" ? amt : Math.min(toRupees(d.partPaid), amt);
+  if (paidNow < amt && !d.supplierId) return;
   const main = catById(d.main);
   const sub = d.sub ? catById(d.sub) : null;
+  const sup = d.supplierId ? supplierById(d.supplierId) : null;
   const ref = doc(collection(db, "transactions"));
+  const balanceDelta = amt - paidNow;
   const data = {
     kind: "expense",
     categoryId: d.main,
     subCategoryId: d.sub || null,
     label: sub ? `${main?.name} › ${sub.name}` : (main?.name || "Expense"),
-    total: amt, paidNow: amt,
-    supplierId: null,
+    total: amt, paidNow, balanceDelta,
+    supplierId: d.supplierId || null,
+    supplierName: sup?.name || (d.supplierId ? "Supplier" : null),
     date: d.date,
-    paymentMethodId: d.methodId,
+    paymentMethodId: paidNow > 0 ? d.methodId : null,
     note: d.note.trim(),
-    createdAt: serverTimestamp(),
-    createdByUser: state.user.uid,
-    createdByStaff: null
+    ...baseTxn()
   };
-  setDoc(ref, data).catch(onWriteError);
+  const batch = writeBatch(db);
+  batch.set(ref, data);
+  if (d.supplierId && balanceDelta) batch.update(doc(db, "suppliers", d.supplierId), { balanceOwed: increment(balanceDelta) });
+  batch.commit().catch(onWriteError);
   bumpUsage(d.main); bumpUsage(d.sub);
-  store.set("lastMethod", d.methodId);
-  finishEntry(ref, `Expense saved: ${formatRs(amt)}`);
+  if (paidNow > 0) store.set("lastMethod", d.methodId);
+  finishEntry({ id: ref.id, ...data }, `Expense saved: ${formatRs(amt)}${balanceDelta ? ` (${formatRs(balanceDelta)} on credit)` : ""}`);
 }
 
-function finishEntry(ref, message) {
-  state.view = "home";
-  state.draft = null;
-  render();
-  window.scrollTo(0, 0);
-  const extra = navigator.onLine ? "" : " (will sync when online)";
-  toast(message + extra, {
-    ms: UNDO_SECONDS * 1000,
-    action: "Undo",
-    onAction: () => {
-      deleteDoc(ref).catch(onWriteError);
-      toast("Entry removed.");
-    }
+/* ---------- receive payment (from a client) ---------- */
+function openPayment(clientId = null) {
+  const c = clientId ? clientById(clientId) : null;
+  const d = {
+    type: "payment", client: c ? { id: c.id, name: c.name, phone: c.phone } : null,
+    search: "", newClient: null, amount: "", methodId: defaultMethodId(), date: localDateStr(), note: ""
+  };
+  if (d.client) onClientPicked(d);
+  go("payment", {}, d);
+}
+
+function renderPayment() {
+  const d = D();
+  if (!d.methodId) d.methodId = defaultMethodId();
+  const amt = toRupees(d.amount || 0);
+  const bal = d.client ? liveBalance(d.client.id) : 0;
+  let effect = "";
+  if (d.client && amt > 0) {
+    if (bal <= 0) effect = `${formatRs(amt)} will be kept as an advance for ${d.client.name}.`;
+    else if (amt < bal) effect = `${formatRs(bal - amt)} will still be owed after this.`;
+    else if (amt === bal) effect = "This clears the full balance.";
+    else effect = `This clears the balance, and ${formatRs(amt - bal)} is kept as an advance.`;
+  }
+  const canSave = d.client && amt > 0 && d.methodId;
+  $app.innerHTML = `
+  ${topbar("Receive payment")}
+  <div class="entry">
+    <section class="block">
+      <h2>1. From which client?</h2>
+      ${clientSection(d)}
+    </section>
+    <section class="block">
+      <h2>2. Amount received</h2>
+      ${numpadHtml(d.amount)}
+      <p class="info good effect" ${effect ? "" : "hidden"}>${esc(effect)}</p>
+    </section>
+    <section class="block">
+      <h2>3. Paid by</h2>
+      ${methodChips(d.methodId)}
+      ${dateAndNote(d)}
+    </section>
+  </div>
+  <footer class="savebar">
+    <div class="sum"><span class="muted small">Received</span><strong class="transfer-text">${formatRs(amt)}</strong></div>
+    <button class="btn primary" data-act="save-payment" ${canSave ? "" : "disabled"}>Save payment</button>
+  </footer>`;
+  bindDateAndNote();
+  bindClientSection();
+  bindNumpad($app.querySelector(".numpad"), d.amount, (v) => { d.amount = v; render(); });
+}
+
+function savePayment() {
+  const d = D();
+  const amt = toRupees(d.amount || 0);
+  if (!d.client || amt <= 0 || !d.methodId) return;
+  const ref = doc(collection(db, "transactions"));
+  const data = {
+    kind: "clientPayment", clientId: d.client.id, clientName: d.client.name,
+    total: amt, paidNow: amt, balanceDelta: -amt,
+    date: d.date, paymentMethodId: d.methodId, note: d.note.trim(),
+    receiptNo: receiptNo(d.date), ...baseTxn()
+  };
+  const batch = writeBatch(db);
+  batch.set(ref, data);
+  batch.update(doc(db, "clients", d.client.id), { balance: increment(-amt) });
+  batch.commit().catch(onWriteError);
+  store.set("lastMethod", d.methodId);
+  rememberClient(d.client.id);
+  finishEntry({ id: ref.id, ...data }, `Payment saved: ${formatRs(amt)} from ${d.client.name}`);
+}
+
+/* ---------- pay supplier ---------- */
+function openSupplierPay(supplierId = null) {
+  const s = supplierId ? supplierById(supplierId) : null;
+  const owed = s ? toRupees(s.balanceOwed) : 0;
+  go("supplierPay", {}, { type: "supplierPay", supplierId, amount: owed > 0 ? String(owed) : "", methodId: defaultMethodId(), date: localDateStr(), note: "" });
+}
+
+function renderSupplierPay() {
+  const d = D();
+  if (!d.methodId) d.methodId = defaultMethodId();
+  const list = state.suppliers.filter((s) => s.active !== false);
+  const s = d.supplierId ? supplierById(d.supplierId) : null;
+  const owed = s ? toRupees(s.balanceOwed) : 0;
+  const amt = toRupees(d.amount || 0);
+  const canSave = s && amt > 0 && d.methodId;
+  $app.innerHTML = `
+  ${topbar("Pay supplier")}
+  <div class="entry">
+    <section class="block">
+      <h2>1. Which supplier?</h2>
+      ${list.length ? `<div class="chips" role="group" aria-label="Supplier">${list.map((x) => `
+        <button class="chip ${x.id === d.supplierId ? "on" : ""}" data-act="pay-pick-supplier" data-id="${esc(x.id)}" aria-pressed="${x.id === d.supplierId}">${esc(x.name)}${toRupees(x.balanceOwed) > 0 ? ` · ${formatRs(x.balanceOwed)}` : ""}</button>`).join("")}
+      </div>` : `<p class="muted">No suppliers yet. Add one in the Suppliers tab.</p>`}
+      ${s ? `<p class="info ${owed > 0 ? "warn" : ""}">${owed > 0 ? `You owe ${esc(s.name)} ${formatRs(owed)}.` : `You don't owe ${esc(s.name)} anything right now.`}</p>` : ""}
+    </section>
+    <section class="block">
+      <h2>2. Amount paid</h2>
+      ${numpadHtml(d.amount)}
+    </section>
+    <section class="block">
+      <h2>3. Paid by</h2>
+      ${methodChips(d.methodId)}
+      ${dateAndNote(d)}
+    </section>
+  </div>
+  <footer class="savebar">
+    <div class="sum"><span class="muted small">Paying</span><strong>${formatRs(amt)}</strong></div>
+    <button class="btn primary" data-act="save-supplier-pay" ${canSave ? "" : "disabled"}>Save payment</button>
+  </footer>`;
+  bindDateAndNote();
+  bindNumpad($app.querySelector(".numpad"), d.amount, (v) => {
+    d.amount = v;
+    const a = toRupees(v || 0);
+    $app.querySelector(".savebar strong").textContent = formatRs(a);
+    $app.querySelector('[data-act="save-supplier-pay"]').disabled = !(s && a > 0 && d.methodId);
   });
+}
+
+function saveSupplierPay() {
+  const d = D();
+  const s = supplierById(d.supplierId);
+  const amt = toRupees(d.amount || 0);
+  if (!s || amt <= 0 || !d.methodId) return;
+  const ref = doc(collection(db, "transactions"));
+  const data = {
+    kind: "supplierPayment", supplierId: s.id, supplierName: s.name,
+    total: amt, paidNow: amt, balanceDelta: -amt,
+    date: d.date, paymentMethodId: d.methodId, note: d.note.trim(), ...baseTxn()
+  };
+  const batch = writeBatch(db);
+  batch.set(ref, data);
+  batch.update(doc(db, "suppliers", s.id), { balanceOwed: increment(-amt) });
+  batch.commit().catch(onWriteError);
+  store.set("lastMethod", d.methodId);
+  finishEntry({ id: ref.id, ...data }, `Paid ${s.name}: ${formatRs(amt)}`);
+}
+
+/* ---------- after saving: undo + receipt ---------- */
+function deleteTxn(t) {
+  const batch = writeBatch(db);
+  batch.delete(doc(db, "transactions", t.id));
+  const delta = toRupees(t.balanceDelta || 0);
+  if (delta && t.clientId && (t.kind === "sale" || t.kind === "clientPayment") && clientById(t.clientId)) {
+    batch.update(doc(db, "clients", t.clientId), { balance: increment(-delta) });
+  }
+  if (delta && t.supplierId && (t.kind === "expense" || t.kind === "supplierPayment") && supplierById(t.supplierId)) {
+    batch.update(doc(db, "suppliers", t.supplierId), { balanceOwed: increment(-delta) });
+  }
+  batch.commit().catch(onWriteError);
+}
+
+function finishEntry(txn, message) {
+  goBack();
+  const extra = navigator.onLine ? "" : " (will sync when online)";
+  const actions = [{ label: "Undo", fn: () => { deleteTxn(txn); toast("Entry removed."); } }];
+  if (txn.kind === "sale" || txn.kind === "clientPayment") actions.push({ label: "Receipt", fn: () => openReceipt(txn) });
+  toast(message + extra, { ms: UNDO_SECONDS * 1000, actions });
+}
+
+async function openReceipt(t) {
+  const client = t.clientId ? clientById(t.clientId) : null;
+  const lines = receiptLines({
+    business: state.business, txn: t, methodName: methodName(t.paymentMethodId),
+    clientPhone: client?.phone || "", clientBalance: client ? toRupees(client.balance) : null
+  });
+  const canvas = drawReceipt(lines);
+  openSheet(`
+    <h2>Receipt</h2>
+    ${!state.business.name ? `<p class="info warn small">Tip: add your parlour's name in <strong>Settings → Business details</strong> so it shows at the top.</p>` : ""}
+    <img class="receipt-img" alt="Receipt preview" src="${canvas.toDataURL("image/png")}">
+    <div class="row-btns">
+      <button class="btn ghost" data-act="close-sheet">Close</button>
+      <button class="btn primary" data-act="share-receipt" disabled>Share</button>
+    </div>`);
+  const file = await canvasToFile(canvas, `receipt-${t.receiptNo || t.id}.png`);
+  sheetHandlers.shareReceipt = async () => {
+    const r = await shareOrDownload(file, "Receipt");
+    if (r === "downloaded") toast("Receipt image saved to Downloads.");
+  };
+  const btn = $sheet.querySelector('[data-act="share-receipt"]');
+  if (btn) btn.disabled = false;
+}
+
+/* ---------- backup ---------- */
+async function openBackup() {
+  openSheet(`<h2>Backup</h2><p class="muted" id="bk-status">Preparing your backup…</p>
+    <div class="row-btns"><button class="btn ghost" data-act="close-sheet">Close</button>
+    <button class="btn primary" data-act="share-backup" disabled>Save / share file</button></div>`);
+  try {
+    const today = localDateStr();
+    const { file, count, fromCacheOnly } = await buildBackup(today);
+    const status = document.getElementById("bk-status");
+    if (!status) return;
+    status.innerHTML = `Backup ready: <strong>${count}</strong> records in <strong>${esc(file.name)}</strong>.<br>
+      Tap the button and choose <strong>Drive</strong> (or another safe place).${fromCacheOnly ? `<br><span class="warn-text">You're offline, so this file has only what's on this device.</span>` : ""}`;
+    sheetHandlers.shareBackup = async () => {
+      const r = await shareOrDownload(file, "Parlour backup");
+      if (r === "cancelled") return;
+      setDoc(doc(db, "meta", "backup"), { lastDate: today, at: serverTimestamp(), by: state.user?.email || null, records: count }).catch(onWriteError);
+      closeSheet();
+      toast(r === "downloaded" ? "Backup saved to Downloads." : "Backup shared.");
+    };
+    $sheet.querySelector('[data-act="share-backup"]').disabled = false;
+  } catch (err) {
+    console.error(err);
+    const status = document.getElementById("bk-status");
+    if (status) status.innerHTML = `<span class="error">Couldn't prepare the backup: ${esc(err?.message || err)}</span>`;
+  }
 }
 
 /* ---------- number pad ---------- */
@@ -654,14 +1605,13 @@ function bindNumpad(el, initial, onChange) {
     if (b) press(b.dataset.key);
   });
   el._press = press;
-  el._set = (v) => { value = String(v || ""); show(); onChange(value); };
   return el;
 }
 
-// Keyboard support for the number pad (useful on a laptop or tablet with keyboard).
+// Keyboard support for the number pad (laptop or tablet with keyboard).
 document.addEventListener("keydown", (e) => {
-  if (e.target.matches("input, textarea")) return;
-  const pad = $sheet.querySelector(".numpad") || (state.view === "expense" ? $app.querySelector(".numpad") : null);
+  if (e.target.matches("input, textarea, select")) return;
+  const pad = $sheet.querySelector(".numpad") || (PAD_VIEWS.has(cur().view) ? $app.querySelector(".numpad") : null);
   if (!pad?._press) return;
   if (/^\d$/.test(e.key)) { pad._press(e.key); e.preventDefault(); }
   else if (e.key === "Backspace") { pad._press("⌫"); e.preventDefault(); }
@@ -670,10 +1620,11 @@ document.addEventListener("keydown", (e) => {
   }
 });
 
-function openPriceSheet({ title, initial, doneLabel, onDone }) {
+function openPriceSheet({ title, initial, doneLabel, onDone, allowZero = false, max = null }) {
   openSheet(`
     <h2>${esc(title)}</h2>
     ${numpadHtml(initial ? String(initial) : "", true)}
+    ${max != null ? `<p class="muted small">Up to ${formatRs(max)}</p>` : ""}
     <div class="row-btns">
       <button class="btn ghost" data-act="close-sheet">Cancel</button>
       <button class="btn primary" data-act="np-done">${esc(doneLabel)}</button>
@@ -683,7 +1634,8 @@ function openPriceSheet({ title, initial, doneLabel, onDone }) {
   bindNumpad(pad, current, (v) => { current = v; });
   sheetHandlers.done = () => {
     const price = toRupees(current || 0);
-    if (price <= 0) { pad.querySelector(".np-display").innerHTML = `<span class="error">Enter a price</span>`; return; }
+    if (price <= 0 && !allowZero) { pad.querySelector(".np-display").innerHTML = `<span class="error">Enter a price</span>`; return; }
+    if (max != null && price > max) { pad.querySelector(".np-display").innerHTML = `<span class="error">More than ${formatRs(max)}</span>`; return; }
     closeSheet();
     onDone(price);
   };
@@ -703,15 +1655,25 @@ function closeSheet() {
   for (const k of Object.keys(sheetHandlers)) delete sheetHandlers[k];
 }
 
+function findTxn(id) {
+  return state.txns.find((x) => x.id === id) || state.profileTxns.find((x) => x.id === id);
+}
+
 function openTxnSheet(id) {
-  const t = state.txns.find((x) => x.id === id);
+  const t = findTxn(id);
   if (!t) return;
-  const isSale = t.kind === "sale";
+  const k = KIND[t.kind] || KIND.sale;
+  const titles = { sale: "Sale", expense: "Expense", clientPayment: "Payment received", supplierPayment: "Paid to supplier" };
+  const due = dueText(t);
   openSheet(`
-    <h2>${isSale ? "Sale" : "Expense"}: ${isSale ? "+" : "−"} ${formatRs(t.total)}</h2>
+    <h2>${titles[t.kind] || "Entry"}: ${k.sign}${formatRs(t.total)}</h2>
     <dl class="details">
-      <div><dt>${isSale ? "Client" : "Category"}</dt><dd>${esc(txnTitle(t))}</dd></div>
-      ${isSale ? `<div><dt>Services</dt><dd>${(t.items || []).map((i) => `${esc(i.name)}: ${formatRs(i.price)}`).join("<br>")}</dd></div>` : ""}
+      ${t.kind === "sale" || t.kind === "clientPayment" ? `<div><dt>Client</dt><dd>${esc(t.clientName || "")}</dd></div>` : ""}
+      ${t.kind === "expense" ? `<div><dt>Category</dt><dd>${esc(txnTitle(t))}</dd></div>` : ""}
+      ${t.supplierName ? `<div><dt>Supplier</dt><dd>${esc(t.supplierName)}</dd></div>` : ""}
+      ${t.kind === "sale" ? `<div><dt>Services</dt><dd>${(t.items || []).map((i) => `${esc(i.name)}: ${formatRs(i.price)}`).join("<br>")}</dd></div>` : ""}
+      ${t.advanceUsed ? `<div><dt>From advance</dt><dd>${formatRs(t.advanceUsed)}</dd></div>` : ""}
+      ${t.kind === "sale" || t.kind === "expense" ? `<div><dt>Paid now</dt><dd>${formatRs(t.paidNow ?? t.total)}${due ? ` <span class="due">(${esc(due)})</span>` : ""}</dd></div>` : ""}
       <div><dt>Paid by</dt><dd>${esc(methodName(t.paymentMethodId) || "—")}</dd></div>
       <div><dt>Date</dt><dd>${esc(niceDate(t.date, true))}</dd></div>
       ${t.note ? `<div><dt>Note</dt><dd>${esc(t.note)}</dd></div>` : ""}
@@ -720,88 +1682,211 @@ function openTxnSheet(id) {
     </dl>
     <div class="row-btns">
       <button class="btn ghost danger" data-act="delete-txn" data-id="${esc(t.id)}">Delete entry</button>
+      ${t.kind === "sale" || t.kind === "clientPayment" ? `<button class="btn ghost" data-act="txn-receipt" data-id="${esc(t.id)}">Receipt</button>` : ""}
       <button class="btn primary" data-act="close-sheet">Close</button>
-    </div>`);
-}
-
-function openMenu() {
-  const n = state.pendingCount;
-  openSheet(`
-    <h2>Account</h2>
-    <p class="muted">Signed in as <strong>${esc(state.user?.email || "")}</strong></p>
-    ${n ? `<p class="warn-text">${n} ${n === 1 ? "entry hasn't" : "entries haven't"} synced yet. Connect to the internet before signing out.</p>` : ""}
-    <div class="row-btns">
-      <button class="btn ghost" data-act="close-sheet">Close</button>
-      <button class="btn ghost danger" data-act="sign-out">Sign out</button>
     </div>
-    <p class="muted small">Stage 1 · version ${esc(APP_VERSION)}</p>`);
+    ${t.balanceDelta ? `<p class="muted small">Deleting also undoes its effect on the ${t.clientId ? "client's" : "supplier's"} balance.</p>` : ""}`);
 }
-const APP_VERSION = "1.0.0";
 
 /* ---------- toast ---------- */
 let toastTimer = null;
-function toast(text, { ms = 4000, action = null, onAction = null, error = false } = {}) {
+let toastActions = [];
+function toast(text, { ms = 4000, actions = [], error = false } = {}) {
   clearTimeout(toastTimer);
+  toastActions = actions;
   $toast.innerHTML = `
   <div class="toast ${error ? "error" : ""}" role="status">
     <span>${esc(text)}</span>
-    ${action ? `<button class="toast-btn" data-act="toast-action">${esc(action)}</button>` : ""}
+    ${actions.map((a, i) => `<button class="toast-btn" data-act="toast-action" data-i="${i}">${esc(a.label)}</button>`).join("")}
   </div>`;
-  toastHandler = onAction;
-  toastTimer = setTimeout(() => { $toast.innerHTML = ""; toastHandler = null; }, ms);
+  toastTimer = setTimeout(() => { $toast.innerHTML = ""; toastActions = []; }, ms);
 }
-let toastHandler = null;
 
 /* ---------- click handling ---------- */
+function twoTap(el, label, fn) {
+  if (el.dataset.armed !== "1") {
+    el.dataset.armed = "1";
+    const old = el.textContent;
+    el.textContent = label;
+    setTimeout(() => { if (el.isConnected) { el.dataset.armed = ""; el.textContent = old; } }, 4000);
+    return;
+  }
+  fn();
+}
+
 const actions = {
+  "tab": (el) => switchTab(el.dataset.tab),
+  "back": () => goBack(),
   "new-sale": () => openSale(),
   "new-expense": () => openExpense(),
-  "back": () => { state.view = "home"; state.draft = null; render(); },
-  "menu": () => openMenu(),
+  "receive-payment": () => openPayment(),
+  "pay-supplier": () => openSupplierPay(),
   "sign-out": () => { closeSheet(); signOut(auth); },
   "close-sheet": () => closeSheet(),
   "np-done": () => sheetHandlers.done?.(),
-  "toast-action": () => {
-    const fn = toastHandler;
-    clearTimeout(toastTimer); $toast.innerHTML = ""; toastHandler = null;
-    fn?.();
+  "share-receipt": () => sheetHandlers.shareReceipt?.(),
+  "share-backup": () => sheetHandlers.shareBackup?.(),
+  "backup": () => openBackup(),
+  "toast-action": (el) => {
+    const a = toastActions[Number(el.dataset.i)];
+    clearTimeout(toastTimer); $toast.innerHTML = ""; toastActions = [];
+    a?.fn();
   },
   "open-txn": (el) => openTxnSheet(el.dataset.id),
-  "delete-txn": (el) => {
-    if (el.dataset.armed !== "1") {
-      el.dataset.armed = "1";
-      el.textContent = "Tap again to delete";
-      setTimeout(() => { if (el.isConnected) { el.dataset.armed = ""; el.textContent = "Delete entry"; } }, 4000);
-      return;
-    }
-    deleteDoc(doc(db, "transactions", el.dataset.id)).catch(onWriteError);
+  "txn-receipt": (el) => { const t = findTxn(el.dataset.id); if (t) openReceipt(t); },
+  "delete-txn": (el) => twoTap(el, "Tap again to delete", () => {
+    const t = findTxn(el.dataset.id);
+    if (t) deleteTxn(t);
     closeSheet();
     toast("Entry deleted.");
-  },
-  "pick-method": (el) => { state.draft.methodId = el.dataset.id; render(); },
+  }),
+  "pick-method": (el) => { D().methodId = el.dataset.id; render(); },
+  "owed-clients": () => { state.ui.clientFilter = "owes"; state.ui.clientQ = ""; switchTab("clients"); },
+  "owed-advances": () => { state.ui.clientFilter = "advance"; state.ui.clientQ = ""; switchTab("clients"); },
 
-  // sale
+  // clients
+  "add-client": () => openClientForm(),
+  "open-client": (el) => go("client", { id: el.dataset.id }),
+  "edit-client": (el) => openClientForm(el.dataset.id),
+  "client-filter": (el) => { state.ui.clientFilter = el.dataset.id || null; render(); },
+  "save-client-form": () => saveClientForm(),
+  "sale-for-client": (el) => openSale(el.dataset.id),
+  "pay-from-client": (el) => openPayment(el.dataset.id),
+  "delete-client": (el) => twoTap(el, "Tap again to delete this client", () => {
+    deleteDoc(doc(db, "clients", el.dataset.id)).catch(onWriteError);
+    goBack();
+    toast("Client deleted.");
+  }),
+  "form-pick": (el) => {
+    const d = D();
+    const id = el.dataset.id;
+    if (el.dataset.kind === "area") d.areaId = d.areaId === id ? null : id;
+    else d.tagIds = d.tagIds.includes(id) ? d.tagIds.filter((x) => x !== id) : [...d.tagIds, id];
+    render();
+  },
+  "form-add-list": (el) => {
+    const kind = el.dataset.kind;
+    openTextSheet({
+      title: kind === "area" ? "New area" : "New tag", placeholder: kind === "area" ? "e.g. Gulshan" : "e.g. Student",
+      saveLabel: "Add",
+      onSave: (name) => {
+        if (listOf(kind, true).some((x) => x.name.toLowerCase() === name.toLowerCase())) return "That name already exists.";
+        const ref = doc(collection(db, "lists"));
+        setDoc(ref, { kind, name, sortOrder: nextOrder(listOf(kind, true)), active: true }).catch(onWriteError);
+        const d = D();
+        if (kind === "area") d.areaId = ref.id; else d.tagIds = [...d.tagIds, ref.id];
+        setTimeout(render, 0);
+      }
+    });
+  },
+
+  // suppliers
+  "add-supplier": () => openSupplierForm(),
+  "open-supplier": (el) => go("supplier", { id: el.dataset.id }),
+  "edit-supplier": (el) => openSupplierForm(el.dataset.id),
+  "save-supplier-form": () => saveSupplierForm(),
+  "expense-for-supplier": (el) => openExpense(el.dataset.id),
+  "pay-this-supplier": (el) => openSupplierPay(el.dataset.id),
+  "delete-supplier": (el) => twoTap(el, "Tap again to delete this supplier", () => {
+    deleteDoc(doc(db, "suppliers", el.dataset.id)).catch(onWriteError);
+    goBack();
+    toast("Supplier deleted.");
+  }),
+  "pick-supplier": (el) => {
+    const d = D();
+    d.supplierId = d.supplierId === el.dataset.id ? null : el.dataset.id;
+    if (!d.supplierId) d.payMode = "full";
+    render();
+  },
+  "new-supplier": () => { D().newSupplier = { name: "", code: "+92", phone: "", error: "" }; render(); },
+  "cancel-new-supplier": () => { D().newSupplier = null; render(); },
+  "pay-pick-supplier": (el) => {
+    const d = D();
+    d.supplierId = el.dataset.id;
+    const owed = toRupees(supplierById(d.supplierId)?.balanceOwed || 0);
+    d.amount = owed > 0 ? String(owed) : "";
+    render();
+  },
+  "save-supplier-pay": () => saveSupplierPay(),
+
+  // settings
+  "open-business": () => go("business", {}, { name: state.business.name || "", phone: state.business.phone || "", address: state.business.address || "", footer: state.business.footer || "" }),
+  "save-business": () => {
+    const d = D();
+    const clean = (s) => String(s || "").trim().replace(/\s+/g, " ");
+    setDoc(doc(db, "meta", "business"), { name: clean(d.name), phone: clean(d.phone), address: clean(d.address), footer: clean(d.footer) }, { merge: true }).catch(onWriteError);
+    toast("Business details saved.");
+    goBack();
+  },
+  "open-categories": () => go("categories"),
+  "cat-type": (el) => { state.ui.catType = el.dataset.type; render(); },
+  "cat-menu": (el) => { const c = catById(el.dataset.id); if (c) itemMenu("categories", c); },
+  "cat-add": (el) => {
+    const parentId = el.dataset.parent || null;
+    const type = state.ui.catType;
+    const parent = parentId ? catById(parentId) : null;
+    openTextSheet({
+      title: parent ? `Add under ${parent.name}` : `New ${type === "income" ? "service group" : "expense group"}`,
+      placeholder: parent ? "e.g. Keratin treatment" : "e.g. Spa", saveLabel: "Add",
+      onSave: (name) => {
+        const siblings = state.categories.filter((c) => c.type === type && (c.parentId || null) === parentId);
+        if (siblings.some((c) => c.name.toLowerCase() === name.toLowerCase())) return "That name already exists here.";
+        setDoc(doc(collection(db, "categories")), { type, name, parentId, sortOrder: nextOrder(siblings), active: true }).catch(onWriteError);
+        toast("Added.");
+      }
+    });
+  },
+  "open-list": (el) => go("lists", { kind: el.dataset.kind }),
+  "list-menu": (el) => { const i = state.lists.find((x) => x.id === el.dataset.id); if (i) itemMenu("lists", i); },
+  "list-add": (el) => {
+    const kind = el.dataset.kind;
+    openTextSheet({
+      title: "Add to " + (LIST_TITLES[kind] || "list"), saveLabel: "Add",
+      onSave: (name) => {
+        if (listOf(kind, true).some((x) => x.name.toLowerCase() === name.toLowerCase())) return "That name already exists.";
+        setDoc(doc(collection(db, "lists")), { kind, name, sortOrder: nextOrder(listOf(kind, true)), active: true }).catch(onWriteError);
+        toast("Added.");
+      }
+    });
+  },
+  "toggle-active": (el) => {
+    const coll = el.dataset.coll;
+    const item = (coll === "categories" ? state.categories : state.lists).find((x) => x.id === el.dataset.id);
+    if (!item) return;
+    if (coll === "lists" && item.kind === "paymentMethod" && item.active !== false && sortedMethods().length <= 1) {
+      toast("Keep at least one payment method.", { error: true }); return;
+    }
+    updateDoc(doc(db, coll, item.id), { active: item.active === false }).catch(onWriteError);
+    closeSheet();
+    toast(item.active === false ? "Shown again." : "Hidden.");
+  },
+
+  // sale & payment client picking
   "pick-client": (el) => {
-    const c = state.clients.find((x) => x.id === el.dataset.id);
+    const c = clientById(el.dataset.id);
     if (!c) return;
-    state.draft.client = { id: c.id, name: c.name, phone: c.phone };
-    state.draft.search = "";
+    const d = D();
+    d.client = { id: c.id, name: c.name, phone: c.phone };
+    d.search = "";
+    onClientPicked(d);
     render();
   },
-  "change-client": () => { state.draft.client = null; state.draft.focusSearch = true; render(); },
+  "change-client": () => { const d = D(); d.client = null; d.focusSearch = true; if (d.type === "payment") d.amount = ""; render(); },
   "new-client": () => {
-    const q = state.draft.search.trim();
+    const d = D();
+    const q = d.search.trim();
     const looksLikePhone = /^[\d\s+-]{3,}$/.test(q);
-    state.draft.newClient = { name: looksLikePhone ? "" : q, code: "+92", phone: looksLikePhone ? q : "", error: "", dupId: null };
+    d.newClient = { name: looksLikePhone ? "" : q, code: "+92", phone: looksLikePhone ? q : "", error: "", dupId: null };
     render();
   },
-  "cancel-new-client": () => { state.draft.newClient = null; render(); },
+  "cancel-new-client": () => { D().newClient = null; render(); },
   "use-dup": (el) => {
-    const c = state.clients.find((x) => x.id === el.dataset.id);
-    if (c) { state.draft.client = { id: c.id, name: c.name, phone: c.phone }; state.draft.newClient = null; render(); }
+    const c = clientById(el.dataset.id);
+    const d = D();
+    if (c) { d.client = { id: c.id, name: c.name, phone: c.phone }; d.newClient = null; onClientPicked(d); render(); }
   },
   "pick-main": (el) => {
-    const d = state.draft;
+    const d = D();
     const id = el.dataset.id;
     if (d.type === "expense") {
       d.main = d.main === id ? null : id;
@@ -815,21 +1900,36 @@ const actions = {
     render();
   },
   "pick-sub": (el) => {
-    const d = state.draft;
+    const d = D();
     if (d.type === "expense") { d.sub = el.dataset.id; render(); return; }
     askPriceAndAdd(d.main, el.dataset.id);
   },
   "edit-item": (el) => {
     const i = Number(el.dataset.i);
-    const it = state.draft.items[i];
+    const it = D().items[i];
     openPriceSheet({
       title: `${it.name}: price`, initial: it.price, doneLabel: "Update",
       onDone: (price) => { it.price = price; render(); }
     });
   },
-  "remove-item": (el) => { state.draft.items.splice(Number(el.dataset.i), 1); render(); },
+  "remove-item": (el) => { D().items.splice(Number(el.dataset.i), 1); render(); },
+  "pay-mode": (el) => {
+    const d = D();
+    d.payMode = el.dataset.mode;
+    render();
+    if (d.payMode === "part") {
+      const max = d.type === "sale" ? saleNumbers(d).collect : toRupees(d.amount || 0);
+      openPartSheet(max, "How much was paid now?");
+    }
+  },
+  "edit-part": () => {
+    const d = D();
+    const max = d.type === "sale" ? saleNumbers(d).collect : toRupees(d.amount || 0);
+    openPartSheet(max, "How much was paid now?");
+  },
   "save-sale": () => saveSale(),
-  "save-expense": () => saveExpense()
+  "save-expense": () => saveExpense(),
+  "save-payment": () => savePayment()
 };
 
 function askPriceAndAdd(mainId, subId) {
@@ -840,7 +1940,7 @@ function askPriceAndAdd(mainId, subId) {
   openPriceSheet({
     title: `${name}: price`, initial: last || "", doneLabel: "Add service",
     onDone: (price) => {
-      state.draft.items.push({ categoryId: mainId, subCategoryId: subId, name, price });
+      D().items.push({ categoryId: mainId, subCategoryId: subId, name, price });
       render();
     }
   });

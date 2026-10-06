@@ -1,6 +1,6 @@
 // Starting categories and payment methods. Written to the database once, on first
 // sign-in. After that they live in the database and can be edited (Stage 2).
-export const SEED_VERSION = 1;
+export const SEED_VERSION = 2;
 
 const INCOME = {
   "Hair": ["Haircut", "Blow-dry", "Hair colour", "Highlights", "Hair treatment", "Hair styling"],
@@ -48,4 +48,11 @@ export const DEFAULT_PAYMENT_METHODS = [
   { id: "pm-bank", kind: "paymentMethod", name: "Bank transfer", sortOrder: 1, active: true },
   { id: "pm-jazzcash", kind: "paymentMethod", name: "JazzCash", sortOrder: 2, active: true },
   { id: "pm-easypaisa", kind: "paymentMethod", name: "Easypaisa", sortOrder: 3, active: true }
+];
+
+// Added in Stage 2 (seed version 2).
+export const DEFAULT_TAGS = [
+  { id: "tag-regular", kind: "tag", name: "Regular", sortOrder: 0, active: true },
+  { id: "tag-vip", kind: "tag", name: "VIP", sortOrder: 1, active: true },
+  { id: "tag-bridal", kind: "tag", name: "Bridal", sortOrder: 2, active: true }
 ];

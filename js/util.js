@@ -108,3 +108,42 @@ export function searchClients(clients, q, limit = 8) {
 export function itemsTotal(items) {
   return items.reduce((s, it) => s + toRupees(it.price), 0);
 }
+
+// Client balance: positive = client owes us, negative = advance we hold for them.
+export function clientBalanceText(b) {
+  const v = toRupees(b);
+  if (v > 0) return { text: "Owes " + formatRs(v), cls: "owes" };
+  if (v < 0) return { text: "Advance " + formatRs(-v), cls: "advance" };
+  return { text: "Settled", cls: "settled" };
+}
+
+export function balanceSummary(clients, suppliers) {
+  let owed = 0, advances = 0, weOwe = 0, owedCount = 0;
+  for (const c of clients) {
+    const b = toRupees(c.balance);
+    if (b > 0) { owed += b; owedCount++; } else if (b < 0) advances -= b;
+  }
+  for (const s of suppliers) weOwe += Math.max(0, toRupees(s.balanceOwed));
+  return { owed, owedCount, advances, weOwe };
+}
+
+// For a sale: how much of the client's advance goes towards this bill,
+// and how much to collect now if paying in full.
+export function saleSplit(total, clientBalance) {
+  const advance = Math.max(0, -toRupees(clientBalance));
+  const advanceUsed = Math.min(advance, toRupees(total));
+  return { advanceUsed, collect: toRupees(total) - advanceUsed };
+}
+
+// Newest first: by date, then by time saved.
+export function byNewest(a, b) {
+  if (a.date !== b.date) return a.date < b.date ? 1 : -1;
+  const ms = (t) => (t.createdAt?.toMillis ? t.createdAt.toMillis() : 0);
+  return ms(b) - ms(a);
+}
+
+export const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+export function birthdayText(b) {
+  if (!b?.day || !b?.month) return "";
+  return `${b.day} ${MONTHS[b.month - 1]}${b.year ? " " + b.year : ""}`;
+}
