@@ -147,3 +147,37 @@ export function birthdayText(b) {
   if (!b?.day || !b?.month) return "";
   return `${b.day} ${MONTHS[b.month - 1]}${b.year ? " " + b.year : ""}`;
 }
+
+// Staff PINs are stored scrambled (SHA-256 of a random salt + the PIN), never as digits.
+export async function hashPin(pin, salt) {
+  const data = new TextEncoder().encode(`${salt}:${pin}`);
+  const buf = await crypto.subtle.digest("SHA-256", data);
+  return Array.from(new Uint8Array(buf), (b) => b.toString(16).padStart(2, "0")).join("");
+}
+export function newSalt() {
+  return Array.from(crypto.getRandomValues(new Uint8Array(12)), (b) => b.toString(16).padStart(2, "0")).join("");
+}
+export const isValidPin = (p) => /^\d{4}$/.test(String(p || ""));
+
+// Monthly report: totals and a row per day that has entries (newest day first).
+export function monthReport(txns) {
+  const days = new Map();
+  let income = 0, expense = 0, sales = 0;
+  for (const t of txns) {
+    if (t.kind !== "sale" && t.kind !== "expense") continue;
+    const amt = toRupees(t.total);
+    const d = days.get(t.date) || { date: t.date, income: 0, expense: 0, count: 0 };
+    if (t.kind === "sale") { d.income += amt; income += amt; sales++; } else { d.expense += amt; expense += amt; }
+    d.count++;
+    days.set(t.date, d);
+  }
+  const rows = [...days.values()].map((d) => ({ ...d, profit: d.income - d.expense }))
+    .sort((a, b) => (a.date < b.date ? 1 : -1));
+  return { income, expense, profit: income - expense, sales, rows };
+}
+
+export function shiftMonth(key, delta) {
+  const [y, m] = key.split("-").map(Number);
+  const d = new Date(y, m - 1 + delta, 1);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}

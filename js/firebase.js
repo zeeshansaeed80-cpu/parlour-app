@@ -21,6 +21,10 @@ const firebaseConfig = {
   appId: "1:707299021696:web:4967ecf2c7b6c24a256765"
 };
 
+// The shared shop-tablet login. Create this user in Firebase -> Authentication -> Users.
+// It doesn't need to be a real mailbox.
+export const SHOP_EMAIL = "shop@parlour-accounts.firebaseapp.com";
+
 export const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
 

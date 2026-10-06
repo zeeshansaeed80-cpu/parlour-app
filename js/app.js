@@ -1,5 +1,5 @@
 import {
-  auth, db, onAuthStateChanged, signInWithEmailAndPassword, signOut,
+  auth, db, SHOP_EMAIL, onAuthStateChanged, signInWithEmailAndPassword, signOut,
   collection, doc, setDoc, updateDoc, deleteDoc, getDoc, getDocFromCache, onSnapshot,
   query, where, writeBatch, serverTimestamp, increment
 } from "./firebase.js";
@@ -7,20 +7,22 @@ import { buildDefaultCategories, DEFAULT_PAYMENT_METHODS, DEFAULT_TAGS, SEED_VER
 import {
   esc, formatRs, toRupees, localDateStr, monthRange, niceDate, monthName,
   normalizePhone, prettyPhone, receiptNo, totalsFor, searchClients, itemsTotal,
-  clientBalanceText, balanceSummary, saleSplit, byNewest, MONTHS, birthdayText
+  clientBalanceText, balanceSummary, saleSplit, byNewest, MONTHS, birthdayText,
+  hashPin, newSalt, isValidPin, monthReport, shiftMonth
 } from "./util.js";
 import { receiptLines, drawReceipt, canvasToFile, shareOrDownload } from "./receipt.js";
 import { buildBackup } from "./backup.js";
 
-const APP_VERSION = "2.0.0";
+const APP_VERSION = "3.0.0";
+const IDLE_LOCK_MS = 10 * 60 * 1000; // shop tablet locks after 10 minutes without use
 const UNDO_SECONDS = 30;
 
 const $app = document.getElementById("app");
 const $sheet = document.getElementById("sheet-root");
 const $toast = document.getElementById("toast-root");
 
-const TABS = ["home", "clients", "suppliers", "settings"];
-const LIVE_VIEWS = new Set(["home", "clients", "suppliers", "settings", "client", "supplier", "categories", "lists"]);
+const TABS = ["home", "clients", "suppliers", "reports", "settings"];
+const LIVE_VIEWS = new Set(["home", "clients", "suppliers", "reports", "settings", "client", "supplier", "categories", "lists", "staffList", "staffHome"]);
 const ENTRY_VIEWS = new Set(["sale", "expense", "payment", "supplierPay", "clientForm", "supplierForm", "business"]);
 const PAD_VIEWS = new Set(["expense", "payment", "supplierPay"]);
 
@@ -35,16 +37,23 @@ const state = {
   profileTxns: [],   // history of the client/supplier being viewed
   business: {},
   backupMeta: null,
+  staffList: [],
+  staff: null,       // shop tablet: the staff member who unlocked it
+  role: null,        // "owner" or "shop"
+  reportTxns: [],
+  reportKey: null,
   monthKey: null,
   pendingCount: 0,
   online: navigator.onLine,
   setupMsg: null,
   stack: [{ view: "home", params: {}, draft: null }],
-  ui: { clientQ: "", clientFilter: null, catType: "income" }
+  ui: { clientQ: "", clientFilter: null, catType: "income", reportMonth: null }
 };
 let unsubs = [];
 let monthUnsub = null;
 let profileUnsub = null;
+let reportUnsub = null;
+const isShop = () => state.role === "shop";
 
 const cur = () => state.stack[state.stack.length - 1];
 const D = () => cur().draft;
@@ -125,6 +134,7 @@ function enterView() {
   if (profileUnsub) { profileUnsub(); profileUnsub = null; }
   state.profileTxns = [];
   const { view, params } = cur();
+  if (view === "reports") subscribeReport();
   if (state.user && (view === "client" || view === "supplier")) {
     const field = view === "client" ? "clientId" : "supplierId";
     profileUnsub = onSnapshot(query(collection(db, "transactions"), where(field, "==", params.id)), { includeMetadataChanges: true }, (snap) => {
@@ -149,19 +159,35 @@ function stopData() {
   unsubs = [];
   if (monthUnsub) { monthUnsub(); monthUnsub = null; }
   if (profileUnsub) { profileUnsub(); profileUnsub = null; }
+  if (reportUnsub) { reportUnsub(); reportUnsub = null; }
   Object.assign(state, {
     categories: [], lists: [], clients: [], suppliers: [], txns: [], profileTxns: [],
-    business: {}, backupMeta: null, monthKey: null, pendingCount: 0
+    business: {}, backupMeta: null, staffList: [], staff: null, role: null,
+    reportTxns: [], reportKey: null, monthKey: null, pendingCount: 0
   });
 }
 
 function startData() {
   stopData();
-  state.stack = [{ view: "home", params: {}, draft: null }];
+  state.role = (state.user.email || "").toLowerCase() === SHOP_EMAIL ? "shop" : "owner";
+  state.stack = [{ view: isShop() ? "staffHome" : "home", params: {}, draft: null }];
   history.replaceState({ d: 0 }, "");
   render();
-  ensureSeed();
   const sub = (ref, fn) => unsubs.push(onSnapshot(ref, fn, onLoadError));
+  sub(collection(db, "staff"), (snap) => {
+    state.staffList = snap.docs.map((d) => ({ id: d.id, ...d.data() })).sort(byName);
+    if (state.staff && !state.staffList.some((x) => x.id === state.staff.id && x.active !== false)) state.staff = null;
+    dataChanged();
+  });
+  if (isShop()) {
+    // The shop tablet only loads what staff need. The server blocks the rest anyway.
+    sub(collection(db, "categories"), (snap) => { state.categories = snap.docs.map((d) => ({ id: d.id, ...d.data() })); dataChanged(); });
+    sub(collection(db, "lists"), (snap) => { state.lists = snap.docs.map((d) => ({ id: d.id, ...d.data() })); dataChanged(); });
+    sub(collection(db, "clients"), (snap) => { state.clients = snap.docs.map((d) => ({ id: d.id, ...d.data() })).sort(byName); dataChanged(); });
+    sub(doc(db, "meta", "business"), (snap) => { state.business = snap.exists() ? snap.data() : {}; dataChanged(); });
+    return;
+  }
+  ensureSeed();
   sub(collection(db, "categories"), (snap) => {
     state.categories = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
     dataChanged();
@@ -275,6 +301,7 @@ function render() {
   document.body.classList.toggle("has-tabbar", !!state.user && isTab);
   if (!state.authReady) { $app.innerHTML = `<div class="splash">Loading…</div>`; return; }
   if (!state.user) { renderLogin(); return; }
+  if (isShop() && !state.staff) { document.body.classList.remove("has-savebar", "has-tabbar"); renderStaffLock(); return; }
 
   // keep the cursor in the same box after a redraw
   const a = document.activeElement;
@@ -284,7 +311,8 @@ function render() {
     home: renderHome, clients: renderClients, suppliers: renderSuppliers, settings: renderSettings,
     client: renderClient, supplier: renderSupplier, clientForm: renderClientForm, supplierForm: renderSupplierForm,
     sale: renderSale, expense: renderExpense, payment: renderPayment, supplierPay: renderSupplierPay,
-    categories: renderCategories, lists: renderLists, business: renderBusiness
+    categories: renderCategories, lists: renderLists, business: renderBusiness,
+    reports: renderReports, staffList: renderStaffList, staffHome: renderStaffHome
   };
   (views[v] || renderHome)();
   if (isTab) $app.insertAdjacentHTML("beforeend", tabbar(v));
@@ -296,7 +324,7 @@ function render() {
 }
 
 function tabbar(active) {
-  const tabs = [["home", "⌂", "Home"], ["clients", "☺", "Clients"], ["suppliers", "▤", "Suppliers"], ["settings", "⚙", "Settings"]];
+  const tabs = [["home", "⌂", "Home"], ["clients", "☺", "Clients"], ["suppliers", "▤", "Suppliers"], ["reports", "▥", "Reports"], ["settings", "⚙", "Settings"]];
   return `<nav class="tabbar" aria-label="Sections">${tabs.map(([id, icon, label]) => `
     <button class="tab ${id === active ? "on" : ""}" data-act="tab" data-tab="${id}" ${id === active ? 'aria-current="page"' : ""}>
       <span class="tab-icon" aria-hidden="true">${icon}</span><span>${label}</span>
@@ -617,7 +645,7 @@ function pickerWithAdd(kind, selected, { multi = false, label }) {
   return `
   <div class="chips" role="group" aria-label="${esc(label)}">${items.map((i) => `
     <button type="button" class="chip ${isOn(i.id) ? "on" : ""}" data-act="form-pick" data-kind="${kind}" data-id="${esc(i.id)}" aria-pressed="${isOn(i.id)}">${esc(i.name)}</button>`).join("")}
-    <button type="button" class="chip add-chip" data-act="form-add-list" data-kind="${kind}">+ New</button>
+    ${isShop() ? "" : `<button type="button" class="chip add-chip" data-act="form-add-list" data-kind="${kind}">+ New</button>`}
   </div>`;
 }
 
@@ -708,7 +736,7 @@ function saveClientForm() {
     toast("Client updated.");
   } else {
     const ref = doc(collection(db, "clients"));
-    setDoc(ref, { ...data, balance: 0, active: true, createdAt: serverTimestamp(), createdBy: state.user.uid }).catch(onWriteError);
+    setDoc(ref, { ...data, balance: 0, active: true, createdAt: serverTimestamp(), createdBy: state.user.uid, createdByStaff: state.staff?.id || null }).catch(onWriteError);
     toast("Client saved.");
   }
   goBack();
@@ -850,6 +878,9 @@ function renderSettings() {
       ${row("open-list", "Areas", listOf("area").map((m) => m.name).join(", ") || "None yet", 'data-kind="area"')}
     </section>
     <section class="card set-group">
+      ${row("open-staff", "Staff (shop tablet)", state.staffList.filter((x) => x.active !== false).map((x) => x.name).join(", ") || "No staff yet: add names and PINs")}
+    </section>
+    <section class="card set-group">
       <div class="set-info"><strong>Backup</strong><span class="muted small">Last backup: ${esc(last)}. Saves a copy of all data as one file you can keep in Google Drive.</span></div>
       <button class="btn primary block" data-act="backup">Save backup now</button>
     </section>
@@ -858,7 +889,7 @@ function renderSettings() {
       ${n ? `<p class="warn-text small">${n} ${n === 1 ? "entry hasn't" : "entries haven't"} synced yet. Connect to the internet before signing out.</p>` : ""}
       <button class="btn ghost danger block" data-act="sign-out">Sign out</button>
     </section>
-    <p class="muted small center">Stage 2 · version ${esc(APP_VERSION)}</p>
+    <p class="muted small center">Stage 3 · version ${esc(APP_VERSION)}</p>
   </div>`;
 }
 
@@ -978,6 +1009,12 @@ function methodChips(selectedId) {
 }
 
 function dateAndNote(d) {
+  if (isShop()) {
+    return `
+  <div class="meta-row"><span class="date-pill static"><span>Date</span> ${esc(niceDate(d.date, true))}</span></div>
+  <label class="field"><span>Note <span class="muted">(optional)</span></span>
+    <input type="text" id="f-note" maxlength="120" value="${esc(d.note)}" placeholder="e.g. paid by husband"></label>`;
+  }
   return `
   <div class="meta-row">
     <label class="date-pill"><span>Date</span>
@@ -997,7 +1034,10 @@ function bindDateAndNote() {
 }
 
 function baseTxn() {
-  return { createdAt: serverTimestamp(), createdByUser: state.user.uid, createdByStaff: null };
+  return {
+    createdAt: serverTimestamp(), createdByUser: state.user.uid,
+    createdByStaff: state.staff?.id || null, createdByStaffName: state.staff?.name || null
+  };
 }
 
 /* client picker (used by New sale and Receive payment) */
@@ -1287,13 +1327,13 @@ function renderExpense() {
       <h2>2. Amount</h2>
       ${numpadHtml(d.amount)}
     </section>
-    <section class="block">
+    ${isShop() ? "" : `<section class="block">
       <h2>3. Supplier <span class="muted small">(optional)</span></h2>
       ${supplierPicker(d)}
-    </section>
+    </section>`}
     <section class="block">
-      <h2>4. Payment</h2>
-      ${payModeBlock(d, {
+      <h2>${isShop() ? "3" : "4"}. Payment</h2>
+      ${isShop() ? `<p class="muted small">Paid in full.</p>` : payModeBlock(d, {
         collect: amt, partLabel: "On credit / part paid", partHint: "will be added to what you owe this supplier.",
         partEnabled: !!d.supplierId, disabledHint: "To buy on credit, pick or add a supplier above."
       })}
@@ -1656,7 +1696,7 @@ function closeSheet() {
 }
 
 function findTxn(id) {
-  return state.txns.find((x) => x.id === id) || state.profileTxns.find((x) => x.id === id);
+  return state.txns.find((x) => x.id === id) || state.profileTxns.find((x) => x.id === id) || state.reportTxns.find((x) => x.id === id);
 }
 
 function openTxnSheet(id) {
@@ -1678,6 +1718,7 @@ function openTxnSheet(id) {
       <div><dt>Date</dt><dd>${esc(niceDate(t.date, true))}</dd></div>
       ${t.note ? `<div><dt>Note</dt><dd>${esc(t.note)}</dd></div>` : ""}
       ${t.receiptNo ? `<div><dt>Receipt no.</dt><dd>${esc(t.receiptNo)}</dd></div>` : ""}
+      <div><dt>Entered by</dt><dd>${t.createdByStaffName ? `${esc(t.createdByStaffName)} <span class="muted small">(shop tablet)</span>` : "Owner"}</dd></div>
       <div><dt>Status</dt><dd>${t._pending ? "Saved on this device, waiting to sync" : "Synced"}</dd></div>
     </dl>
     <div class="row-btns">
@@ -1931,6 +1972,268 @@ const actions = {
   "save-expense": () => saveExpense(),
   "save-payment": () => savePayment()
 };
+
+
+/* ---------- shop tablet: staff lock, home, PIN ---------- */
+let pinTry = { staffId: null, digits: "", error: "", fails: 0, waitUntil: 0 };
+
+function renderStaffLock() {
+  const staff = state.staffList.filter((x) => x.active !== false);
+  const picked = staff.find((x) => x.id === pinTry.staffId);
+  if (!picked) {
+    $app.innerHTML = `
+    <section class="lock">
+      <p class="eyebrow">${esc(state.business.name || "Parlour Accounts")}</p>
+      <h1>Who's using the tablet?</h1>
+      ${staff.length ? `<div class="staff-grid">${staff.map((x) => `
+        <button class="staff-btn" data-act="lock-pick" data-id="${esc(x.id)}">
+          <span class="avatar big-av" aria-hidden="true">${esc(x.name.charAt(0).toUpperCase())}</span><span>${esc(x.name)}</span>
+        </button>`).join("")}</div>`
+        : `<div class="empty"><p>No staff added yet.</p><p class="muted small">The owner can add staff names and PINs in <strong>Settings → Staff</strong> on their phone.</p></div>`}
+      <button class="btn ghost" data-act="sign-out">Sign out of shop account</button>
+    </section>`;
+    return;
+  }
+  const waiting = pinTry.waitUntil > Date.now();
+  $app.innerHTML = `
+  <section class="lock">
+    <p class="eyebrow">Hi ${esc(picked.name)}</p>
+    <h1>Enter your PIN</h1>
+    <div class="pin-dots" aria-label="${pinTry.digits.length} of 4 digits entered">${[0, 1, 2, 3].map((i) => `<span class="${i < pinTry.digits.length ? "on" : ""}"></span>`).join("")}</div>
+    <p class="error" role="alert">${esc(waiting ? "Too many wrong tries. Wait 30 seconds." : pinTry.error)}</p>
+    <div class="np-keys pin-keys">${["1", "2", "3", "4", "5", "6", "7", "8", "9", "", "0", "⌫"].map((k) => k ? `
+      <button type="button" class="np-key" data-act="pin-key" data-key="${k}" aria-label="${k === "⌫" ? "Delete" : k}" ${waiting ? "disabled" : ""}>${k}</button>` : "<span></span>").join("")}</div>
+    <button class="btn ghost" data-act="lock-back">Not ${esc(picked.name)}?</button>
+  </section>`;
+}
+
+async function pinKey(k) {
+  if (pinTry.waitUntil > Date.now()) return;
+  pinTry.error = "";
+  if (k === "⌫") pinTry.digits = pinTry.digits.slice(0, -1);
+  else if (pinTry.digits.length < 4) pinTry.digits += k;
+  render();
+  if (pinTry.digits.length < 4) return;
+  const x = state.staffList.find((s) => s.id === pinTry.staffId);
+  const ok = x && (await hashPin(pinTry.digits, x.pinSalt)) === x.pinHash;
+  if (ok) {
+    state.staff = { id: x.id, name: x.name };
+    pinTry = { staffId: null, digits: "", error: "", fails: 0, waitUntil: 0 };
+    lastActivity = Date.now();
+    state.stack = [{ view: "staffHome", params: {}, draft: null }];
+    history.replaceState({ d: 0 }, "");
+    render();
+  } else {
+    pinTry.fails++;
+    pinTry.digits = "";
+    pinTry.error = "Wrong PIN. Try again.";
+    if (pinTry.fails >= 5) { pinTry.fails = 0; pinTry.waitUntil = Date.now() + 30000; setTimeout(render, 30500); }
+    render();
+  }
+}
+
+function lockTablet() {
+  state.staff = null;
+  pinTry = { staffId: null, digits: "", error: "", fails: 0, waitUntil: 0 };
+  closeSheet();
+  state.stack = [{ view: "staffHome", params: {}, draft: null }];
+  history.replaceState({ d: 0 }, "");
+  render();
+}
+
+// Auto-lock the shop tablet when nobody has used it for a while.
+let lastActivity = Date.now();
+["pointerdown", "keydown"].forEach((ev) => document.addEventListener(ev, () => { lastActivity = Date.now(); }, { passive: true }));
+setInterval(() => {
+  if (isShop() && state.staff && Date.now() - lastActivity > IDLE_LOCK_MS) lockTablet();
+}, 15000);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && isShop() && state.staff && Date.now() - lastActivity > IDLE_LOCK_MS) lockTablet();
+});
+
+function renderStaffHome() {
+  $app.innerHTML = `
+  <header class="topbar">
+    <div><p class="eyebrow">${esc(state.business.name || "Parlour Accounts")}</p><h1>Hi ${esc(state.staff?.name || "")}</h1></div>
+    <button class="btn ghost" data-act="lock">Lock</button>
+  </header>
+  ${!state.online ? `<div class="banner offline"><span class="dot"></span>Offline. Entries are saved on this tablet and will sync when the internet is back.</div>` : ""}
+  ${!state.categories.length ? `<div class="banner warn">Loading categories… If this doesn't go away, the owner needs to sign in once on their phone first.</div>` : ""}
+  <div class="staff-actions">
+    <button class="big income" data-act="new-sale"><span class="big-sign" aria-hidden="true">+</span>New sale</button>
+    <button class="big soft" data-act="receive-payment"><span class="big-sign" aria-hidden="true">⇩</span>Receive payment</button>
+    <button class="big expense" data-act="new-expense"><span class="big-sign" aria-hidden="true">−</span>New expense</button>
+    <button class="big soft" data-act="add-client"><span class="big-sign" aria-hidden="true">☺</span>New client</button>
+  </div>
+  <p class="muted small center staff-note">Tap <strong>Lock</strong> when you're done. The tablet also locks itself after 10 minutes.</p>`;
+}
+
+/* staff management (owner) */
+function renderStaffList() {
+  const list = state.staffList;
+  $app.innerHTML = `
+  ${topbar("Staff (shop tablet)")}
+  <div class="settings">
+    <p class="muted small">Each person picks their name on the shop tablet and enters their own 4-digit PIN. Their name is saved on every entry they make.</p>
+    <article class="card">
+      ${list.length ? `<ul class="cat-subs">${list.map((x) => `
+        <li class="cat-item ${x.active === false ? "hidden-item" : ""}">
+          <span>${esc(x.name)}${x.active === false ? ` <span class="muted small">(can't sign in)</span>` : ""}</span>
+          <button class="icon-btn small" data-act="staff-menu" data-id="${esc(x.id)}" aria-label="Options for ${esc(x.name)}">⋯</button>
+        </li>`).join("")}</ul>` : `<p class="muted">No staff yet.</p>`}
+    </article>
+    <button class="btn primary block" data-act="staff-add">+ Add staff member</button>
+    <article class="card set-group">
+      <div class="set-info"><strong>Setting up the shop tablet</strong>
+      <span class="muted small">Sign in on the tablet once with the shop login <strong>${esc(SHOP_EMAIL)}</strong> (see README). After that, staff only use their PINs.</span></div>
+    </article>
+  </div>`;
+}
+
+function openStaffSheet(x = null) {
+  openSheet(`
+    <h2>${x ? `Change PIN for ${esc(x.name)}` : "Add staff member"}</h2>
+    <form id="staff-form" class="stack" novalidate>
+      ${x ? "" : `<label class="field"><span>Name</span><input type="text" id="st-name" maxlength="30" autocomplete="off"></label>`}
+      <label class="field"><span>4-digit PIN</span><input type="password" id="st-pin" inputmode="numeric" maxlength="4" autocomplete="new-password"></label>
+      <label class="field"><span>Type the PIN again</span><input type="password" id="st-pin2" inputmode="numeric" maxlength="4" autocomplete="new-password"></label>
+      <p class="error" role="alert"></p>
+      ${x ? `<button type="button" class="btn ghost block" data-act="staff-toggle" data-id="${esc(x.id)}">${x.active === false ? "Allow to sign in again" : "Stop this person signing in"}</button>` : ""}
+      <div class="row-btns">
+        <button type="button" class="btn ghost" data-act="close-sheet">Cancel</button>
+        <button type="submit" class="btn primary">Save</button>
+      </div>
+    </form>`);
+  (document.getElementById("st-name") || document.getElementById("st-pin")).focus();
+  document.getElementById("staff-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const err = $sheet.querySelector(".error");
+    const name = x ? x.name : document.getElementById("st-name").value.trim().replace(/\s+/g, " ");
+    const pin = document.getElementById("st-pin").value.trim();
+    const pin2 = document.getElementById("st-pin2").value.trim();
+    if (!name) { err.textContent = "Enter a name."; return; }
+    if (!x && state.staffList.some((s) => s.name.toLowerCase() === name.toLowerCase())) { err.textContent = "Someone with that name already exists."; return; }
+    if (!isValidPin(pin)) { err.textContent = "The PIN must be exactly 4 digits."; return; }
+    if (pin !== pin2) { err.textContent = "The two PINs don't match."; return; }
+    const pinSalt = newSalt();
+    const pinHash = await hashPin(pin, pinSalt);
+    if (x) updateDoc(doc(db, "staff", x.id), { pinSalt, pinHash }).catch(onWriteError);
+    else setDoc(doc(collection(db, "staff")), { name, pinSalt, pinHash, active: true, createdAt: serverTimestamp() }).catch(onWriteError);
+    closeSheet();
+    toast(x ? `PIN changed for ${name}.` : `${name} added.`);
+  });
+}
+
+/* ---------- reports (owner) ---------- */
+function reportKey() { return state.ui.reportMonth || localDateStr().slice(0, 7); }
+
+function subscribeReport() {
+  const key = reportKey();
+  if (key === localDateStr().slice(0, 7)) {
+    if (reportUnsub) { reportUnsub(); reportUnsub = null; }
+    state.reportKey = key;
+    return;
+  }
+  if (state.reportKey === key && reportUnsub) return;
+  if (reportUnsub) reportUnsub();
+  state.reportKey = key;
+  state.reportTxns = [];
+  state.reportLoading = true;
+  reportUnsub = onSnapshot(query(collection(db, "transactions"), where("date", ">=", `${key}-01`), where("date", "<=", `${key}-31`)), (snap) => {
+    state.reportTxns = snap.docs.map((d) => ({ id: d.id, ...d.data({ serverTimestamps: "estimate" }) }));
+    state.reportLoading = false;
+    if (cur().view === "reports") render();
+  }, onLoadError);
+}
+
+function reportTxnList() {
+  return reportKey() === localDateStr().slice(0, 7) ? state.txns : state.reportTxns;
+}
+
+function renderReports() {
+  const key = reportKey();
+  const isCurrent = key === localDateStr().slice(0, 7);
+  const r = monthReport(reportTxnList());
+  const owing = state.clients.filter((c) => toRupees(c.balance) > 0).sort((a, b) => toRupees(b.balance) - toRupees(a.balance));
+  const adv = state.clients.filter((c) => toRupees(c.balance) < 0).sort((a, b) => toRupees(a.balance) - toRupees(b.balance));
+  const sup = state.suppliers.filter((x) => toRupees(x.balanceOwed) > 0).sort((a, b) => toRupees(b.balanceOwed) - toRupees(a.balanceOwed));
+  const b = balanceSummary(state.clients, state.suppliers);
+  const balList = (items, act, amt, cls) => items.length ? `<ul class="bal-list">${items.map((x) => `
+    <li><button class="bal-row" data-act="${act}" data-id="${esc(x.id)}"><span>${esc(x.name)}</span><strong class="${cls}">${formatRs(Math.abs(amt(x)))}</strong></button></li>`).join("")}</ul>`
+    : `<p class="muted small">None.</p>`;
+  $app.innerHTML = `
+  <header class="topbar"><div><p class="eyebrow">Profit & loss</p><h1>Reports</h1></div></header>
+  <div class="reports">
+    <div class="month-nav">
+      <button class="icon-btn" data-act="report-month" data-delta="-1" aria-label="Previous month">◀</button>
+      <strong>${esc(monthName(key + "-01"))}</strong>
+      <button class="icon-btn" data-act="report-month" data-delta="1" aria-label="Next month" ${isCurrent ? "disabled" : ""}>▶</button>
+    </div>
+    <article class="card totals">
+      <dl>
+        <div class="row income"><dt><span class="sign" aria-hidden="true">↑</span>Income <span class="muted small">(${r.sales} sales)</span></dt><dd>+ ${formatRs(r.income)}</dd></div>
+        <div class="row expense"><dt><span class="sign" aria-hidden="true">↓</span>Expenses</dt><dd>− ${formatRs(r.expense)}</dd></div>
+        <div class="row profit ${r.profit < 0 ? "neg" : "pos"}"><dt>Profit</dt><dd>${r.profit < 0 ? "− " : ""}${formatRs(r.profit)}</dd></div>
+      </dl>
+    </article>
+    <section>
+      <h2 class="section-title">Day by day</h2>
+      ${state.reportLoading && !isCurrent ? `<p class="muted">Loading…</p>` : r.rows.length ? `
+      <div class="card day-table" role="table" aria-label="Daily profit and loss">
+        <div class="day-row head" role="row"><span role="columnheader">Day</span><span role="columnheader">Income</span><span role="columnheader">Expenses</span><span role="columnheader">Profit</span></div>
+        ${r.rows.map((d) => `
+        <button class="day-row" role="row" data-act="report-day" data-date="${esc(d.date)}">
+          <span role="cell">${esc(niceDate(d.date))}</span>
+          <span role="cell" class="income-text">${formatRs(d.income)}</span>
+          <span role="cell" class="expense-text">${formatRs(d.expense)}</span>
+          <span role="cell" class="${d.profit < 0 ? "expense-text" : ""}"><strong>${d.profit < 0 ? "−" : ""}${formatRs(d.profit)}</strong></span>
+        </button>`).join("")}
+      </div>` : `<div class="empty"><p>No sales or expenses in this month.</p></div>`}
+    </section>
+    <section class="bal-grid">
+      <article class="card"><header><h2>Clients owe you</h2><strong class="warn-text">${formatRs(b.owed)}</strong></header>${balList(owing, "open-client", (x) => x.balance, "warn-text")}</article>
+      <article class="card"><header><h2>Advances held</h2><strong class="income-text">${formatRs(b.advances)}</strong></header>${balList(adv, "open-client", (x) => x.balance, "income-text")}</article>
+      <article class="card"><header><h2>You owe suppliers</h2><strong class="expense-text">${formatRs(b.weOwe)}</strong></header>${balList(sup, "open-supplier", (x) => x.balanceOwed, "expense-text")}</article>
+    </section>
+    <p class="muted small">Income is the full price of sales made in the month (including parts still owed). Payments received and supplier payments move money owed; they aren't counted again as income or expenses.</p>
+  </div>`;
+}
+
+function openDaySheet(date) {
+  const list = reportTxnList().filter((t) => t.date === date).sort(byNewest);
+  openSheet(`
+    <h2>${esc(niceDate(date, true))}</h2>
+    ${list.length ? `<ul class="txn-list">${list.map((t) => txnRow(t)).join("")}</ul>` : `<p class="muted">No entries.</p>`}
+    <div class="row-btns"><button class="btn primary" data-act="close-sheet">Close</button></div>`);
+}
+
+
+Object.assign(actions, {
+  "lock-pick": (el) => { pinTry = { staffId: el.dataset.id, digits: "", error: "", fails: pinTry.fails, waitUntil: pinTry.waitUntil }; render(); },
+  "lock-back": () => { pinTry.staffId = null; pinTry.digits = ""; pinTry.error = ""; render(); },
+  "pin-key": (el) => pinKey(el.dataset.key),
+  "lock": () => lockTablet(),
+  "open-staff": () => go("staffList"),
+  "staff-add": () => openStaffSheet(),
+  "staff-menu": (el) => { const x = state.staffList.find((s) => s.id === el.dataset.id); if (x) openStaffSheet(x); },
+  "staff-toggle": (el) => {
+    const x = state.staffList.find((s) => s.id === el.dataset.id);
+    if (!x) return;
+    updateDoc(doc(db, "staff", x.id), { active: x.active === false }).catch(onWriteError);
+    closeSheet();
+    toast(x.active === false ? `${x.name} can sign in again.` : `${x.name} can no longer sign in.`);
+  },
+  "report-month": (el) => {
+    const next = shiftMonth(reportKey(), Number(el.dataset.delta));
+    if (next > localDateStr().slice(0, 7)) return;
+    state.ui.reportMonth = next;
+    subscribeReport();
+    render();
+  },
+  "report-day": (el) => openDaySheet(el.dataset.date),
+  "open-txn": (el) => { closeSheet(); openTxnSheet(el.dataset.id); }
+});
+
 
 function askPriceAndAdd(mainId, subId) {
   const main = catById(mainId);
