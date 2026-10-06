@@ -1,4 +1,4 @@
-# Parlour Accounts (Stage 1)
+# Parlour Accounts (Stage 2)
 
 Income, expenses and clients for the parlour. A plain HTML/CSS/JS web app that installs
 to the home screen, works offline, and syncs through Firebase.
@@ -9,7 +9,9 @@ to the home screen, works offline, and syncs through Firebase.
 | `index.html` | The page shell |
 | `css/styles.css` | All styling (light + dark mode, phone + tablet) |
 | `js/firebase.js` | Connects to the Firebase project; turns on offline storage |
-| `js/app.js` | Screens: login, home, new sale, new expense, entry details |
+| `js/app.js` | All screens: login, home, sales, expenses, payments, clients, suppliers, settings |
+| `js/receipt.js` | Draws the shareable receipt image |
+| `js/backup.js` | Builds the backup file |
 | `js/seed.js` | Starting categories and payment methods (written once on first sign-in) |
 | `js/util.js` | Helpers: money, dates, phone numbers, totals |
 | `sw.js` | Keeps a copy of the app on the device so it opens without internet |
@@ -38,7 +40,7 @@ Then open the address it prints (e.g. http://localhost:3000). `localhost` is alr
 Open the GitHub Pages address in Chrome → menu ⋮ → **Add to Home screen** (or **Install app**).
 On iPhone/iPad: Safari → Share → **Add to Home Screen**.
 
-## What to test
+## What to test (Stage 1)
 1. Sign in with an owner account. The first sign-in needs internet; categories load within a few seconds.
 2. **New sale:** search or add a client (phone `0300 1234567` is saved as `+923001234567`),
    tap services (e.g. Skin → Facial, Hair removal → Threading), enter prices, Save.
@@ -49,6 +51,22 @@ On iPhone/iPad: Safari → Share → **Add to Home Screen**.
    the label disappears within a few seconds.
 6. **Two devices:** sign in on a second device. Entries from the first appear automatically.
 7. **Rules:** sign in with an email that is *not* in the rules list. You should see "Access denied".
+
+## What to test (Stage 2)
+1. **Business details:** Settings → Business details → enter the parlour name, phone, address → Save.
+2. **Clients:** Clients tab → + Add → name, phone, area (+ New), tags, birthday → Save. Try search and the filter chips.
+3. **Part payment:** open the client → New sale → add services → Part paid / pay later → enter what was paid → Save.
+   The client now shows "Owes"; Home → Money owed shows the amount.
+4. **Receipt:** tap Receipt on the message after saving (or open an entry → Receipt) → Share → WhatsApp.
+5. **Receive payment:** Home → Receive payment → pick the client. The amount owed is filled in. Paying more than owed keeps the rest as an advance.
+6. **Advance:** a new sale for a client with an advance takes it from the advance automatically.
+7. **Supplier credit:** New expense → pick category, amount → + New supplier → On credit / part paid → Save.
+   Suppliers tab shows what you owe; open the supplier → Pay supplier.
+8. **Delete/Undo** of any of these also undoes the change to the balance.
+9. **Categories & lists:** Settings → Categories: add a service, hide one. Settings → Payment methods / Client tags / Areas.
+10. **Backup:** tap Back up on the home banner (or Settings → Save backup now) → Save / share file → choose Drive.
+    The banner disappears for the rest of the day on all devices.
+11. **Phone back button** goes back one screen instead of closing the app.
 
 ## Updating the app later
 After changing any file, bump `VERSION` in `sw.js` (e.g. `parlour-v1.0.1`) so installed copies
