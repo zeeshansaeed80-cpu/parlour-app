@@ -547,3 +547,12 @@ button.rep-row:active { background: var(--plum-soft); }
   .rep-row { font-size: .84rem; padding: 8px 10px; gap: 6px; }
   .visit { grid-template-columns: 1fr; gap: 6px; }
 }
+
+/* ===================== Done by / staff report ===================== */
+.item-by { display: block; font-size: .8rem; font-weight: 500; color: var(--muted); }
+.done-by { margin-bottom: 4px; }
+.rep-row.cols3 { grid-template-columns: 1.8fr .7fr 1fr; }
+.total-row { background: var(--surface-2); }
+.report-tabs { gap: 6px; }
+.report-tabs .chip { padding: 6px 12px; }
+.report-tabs .chip.on::before { content: ""; }

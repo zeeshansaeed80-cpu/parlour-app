@@ -9,12 +9,12 @@ import {
   normalizePhone, prettyPhone, receiptNo, totalsFor, searchClients, itemsTotal,
   clientBalanceText, balanceSummary, saleSplit, byNewest, MONTHS, birthdayText,
   hashPin, newSalt, isValidPin, monthReport, shiftMonth,
-  daysAgoText, periodStart, serviceReport, customersReport, clientSummary
+  daysAgoText, periodStart, serviceReport, customersReport, clientSummary, staffReport
 } from "./util.js";
 import { receiptLines, drawReceipt, canvasToFile, shareOrDownload } from "./receipt.js";
 import { buildBackup } from "./backup.js";
 
-const APP_VERSION = "4.1.0";
+const APP_VERSION = "4.2.0";
 const BG_LOCK_MS = 2 * 60 * 1000; // owner app locks again after 2 minutes in the background
 const IDLE_LOCK_MS = 10 * 60 * 1000; // shop tablet locks after 10 minutes without use
 const UNDO_SECONDS = 30;
@@ -24,7 +24,7 @@ const $sheet = document.getElementById("sheet-root");
 const $toast = document.getElementById("toast-root");
 
 const TABS = ["home", "clients", "suppliers", "reports", "settings"];
-const LIVE_VIEWS = new Set(["clientReport", "home", "clients", "suppliers", "reports", "settings", "client", "supplier", "categories", "lists", "staffList", "staffHome"]);
+const LIVE_VIEWS = new Set(["staffReport", "clientReport", "home", "clients", "suppliers", "reports", "settings", "client", "supplier", "categories", "lists", "staffList", "staffHome"]);
 const ENTRY_VIEWS = new Set(["sale", "expense", "payment", "supplierPay", "clientForm", "supplierForm", "business"]);
 const PAD_VIEWS = new Set(["expense", "payment", "supplierPay"]);
 
@@ -156,7 +156,7 @@ function watchProfile(kind, id) {
 function enterView() {
   closeSheet();
   const { view, params } = cur();
-  if (view === "reports") { subscribeReport(); if (state.ui.reportTab !== "pl") subscribePeriod(); }
+  if (view === "reports" || view === "staffReport") { subscribeReport(); if (["services", "customers"].includes(state.ui.reportTab)) subscribePeriod(); }
   if (view === "client" || view === "supplier") watchProfile(view, params.id);
   else if (view === "clientReport") watchProfile("client", params.id);
   else if (view === "clients" && isWide() && state.ui.paneClient) watchProfile("client", state.ui.paneClient);
@@ -349,7 +349,8 @@ function render() {
     client: renderClient, supplier: renderSupplier, clientForm: renderClientForm, supplierForm: renderSupplierForm,
     sale: renderSale, expense: renderExpense, payment: renderPayment, supplierPay: renderSupplierPay,
     categories: renderCategories, lists: renderLists, business: renderBusiness,
-    reports: renderReports, staffList: renderStaffList, staffHome: renderStaffHome, clientReport: renderClientReport
+    reports: renderReports, staffList: renderStaffList, staffHome: renderStaffHome, clientReport: renderClientReport,
+    staffReport: renderStaffReportDetail
   };
   (views[v] || renderHome)();
   if (isTab) $app.insertAdjacentHTML("beforeend", tabbar(v));
@@ -1281,7 +1282,7 @@ function renderSale() {
       <h2>2. Services</h2>
       ${d.items.length ? `<ul class="items">${d.items.map((it, i) => `
         <li>
-          <button class="item" data-act="edit-item" data-i="${i}"><span>${esc(it.name)}</span><span class="amt">${formatRs(it.price)}</span></button>
+          <button class="item" data-act="edit-item" data-i="${i}"><span>${esc(it.name)}${it.doneByName ? `<span class="item-by">by ${esc(it.doneByName)}</span>` : ""}</span><span class="amt">${formatRs(it.price)}</span></button>
           <button class="icon-btn small" data-act="remove-item" data-i="${i}" aria-label="Remove ${esc(it.name)}">×</button>
         </li>`).join("")}</ul>` : `<p class="muted small">Tap a service to add it. Add as many as the client had.</p>`}
       ${categoryPicker("income", d)}
@@ -1313,7 +1314,10 @@ function saveSale() {
     kind: "sale",
     clientId: d.client.id,
     clientName: d.client.name,
-    items: d.items.map((it) => ({ categoryId: it.categoryId, subCategoryId: it.subCategoryId, name: it.name, price: toRupees(it.price) })),
+    items: d.items.map((it) => ({
+      categoryId: it.categoryId, subCategoryId: it.subCategoryId, name: it.name, price: toRupees(it.price),
+      doneById: it.doneById || null, doneByName: it.doneByName || null
+    })),
     total: n.total, paidNow: n.paidNow, advanceUsed: n.advanceUsed, balanceDelta,
     date: d.date,
     paymentMethodId: n.paidNow > 0 ? d.methodId : null,
@@ -1723,10 +1727,22 @@ document.addEventListener("keydown", (e) => {
   }
 });
 
-function openPriceSheet({ title, initial, doneLabel, onDone, allowZero = false, max = null }) {
+function activeStaff() { return state.staffList.filter((x) => x.active !== false).sort(byName); }
+function defaultDoneBy() {
+  if (isShop() && state.staff) return state.staff.id;
+  const last = store.get("lastDoneBy", null);
+  return activeStaff().some((x) => x.id === last) ? last : null;
+}
+
+function openPriceSheet({ title, initial, doneLabel, onDone, allowZero = false, max = null, doneBy }) {
+  const staff = doneBy !== undefined ? activeStaff() : [];
+  let picked = doneBy ?? null;
+  const staffChips = () => `<button class="chip small-chip ${!picked ? "on" : ""}" data-act="sheet-staff" data-id="" aria-pressed="${!picked}">Not set</button>
+    ${staff.map((x) => `<button class="chip small-chip ${picked === x.id ? "on" : ""}" data-act="sheet-staff" data-id="${esc(x.id)}" aria-pressed="${picked === x.id}">${esc(x.name)}</button>`).join("")}`;
   openSheet(`
     <h2>${esc(title)}</h2>
     ${numpadHtml(initial ? String(initial) : "", true)}
+    ${staff.length ? `<p class="muted small label">Done by</p><div class="chips done-by" role="group" aria-label="Done by">${staffChips()}</div>` : ""}
     ${max != null ? `<p class="muted small">Up to ${formatRs(max)}</p>` : ""}
     <div class="row-btns">
       <button class="btn ghost" data-act="close-sheet">Cancel</button>
@@ -1740,7 +1756,12 @@ function openPriceSheet({ title, initial, doneLabel, onDone, allowZero = false, 
     if (price <= 0 && !allowZero) { pad.querySelector(".np-display").innerHTML = `<span class="error">Enter a price</span>`; return; }
     if (max != null && price > max) { pad.querySelector(".np-display").innerHTML = `<span class="error">More than ${formatRs(max)}</span>`; return; }
     closeSheet();
-    onDone(price);
+    onDone(price, picked);
+  };
+  sheetHandlers.pickStaff = (id) => {
+    picked = id || null;
+    const box = $sheet.querySelector(".done-by");
+    if (box) box.innerHTML = staffChips();
   };
 }
 
@@ -1774,7 +1795,7 @@ function openTxnSheet(id) {
       ${t.kind === "sale" || t.kind === "clientPayment" ? `<div><dt>Client</dt><dd>${esc(t.clientName || "")}</dd></div>` : ""}
       ${t.kind === "expense" ? `<div><dt>Category</dt><dd>${esc(txnTitle(t))}</dd></div>` : ""}
       ${t.supplierName ? `<div><dt>Supplier</dt><dd>${esc(t.supplierName)}</dd></div>` : ""}
-      ${t.kind === "sale" ? `<div><dt>Services</dt><dd>${(t.items || []).map((i) => `${esc(i.name)}: ${formatRs(i.price)}`).join("<br>")}</dd></div>` : ""}
+      ${t.kind === "sale" ? `<div><dt>Services</dt><dd>${(t.items || []).map((i) => `${esc(i.name)}: ${formatRs(i.price)}${i.doneByName ? ` <span class="muted small">(${esc(i.doneByName)})</span>` : ""}`).join("<br>")}</dd></div>` : ""}
       ${t.advanceUsed ? `<div><dt>From advance</dt><dd>${formatRs(t.advanceUsed)}</dd></div>` : ""}
       ${t.kind === "sale" || t.kind === "expense" ? `<div><dt>Paid now</dt><dd>${formatRs(t.paidNow ?? t.total)}${due ? ` <span class="due">(${esc(due)})</span>` : ""}</dd></div>` : ""}
       <div><dt>Paid by</dt><dd>${esc(methodName(t.paymentMethodId) || "—")}</dd></div>
@@ -2018,10 +2039,11 @@ const actions = {
     const i = Number(el.dataset.i);
     const it = D().items[i];
     openPriceSheet({
-      title: `${it.name}: price`, initial: it.price, doneLabel: "Update",
-      onDone: (price) => { it.price = price; render(); }
+      title: `${it.name}: price`, initial: it.price, doneLabel: "Update", doneBy: it.doneById || null,
+      onDone: (price, staffId) => { it.price = price; setDoneBy(it, staffId); render(); }
     });
   },
+  "sheet-staff": (el) => sheetHandlers.pickStaff?.(el.dataset.id),
   "remove-item": (el) => { D().items.splice(Number(el.dataset.i), 1); render(); },
   "pay-mode": (el) => {
     const d = D();
@@ -2047,7 +2069,7 @@ const actions = {
 let pinTry = { staffId: null, digits: "", error: "", fails: 0, waitUntil: 0 };
 
 function renderStaffLock() {
-  const staff = state.staffList.filter((x) => x.active !== false);
+  const staff = state.staffList.filter((x) => x.active !== false && x.pinHash);
   const picked = staff.find((x) => x.id === pinTry.staffId);
   if (!picked) {
     $app.innerHTML = `
@@ -2144,11 +2166,11 @@ function renderStaffList() {
   $app.innerHTML = `
   ${topbar("Staff (shop tablet)")}
   <div class="settings">
-    <p class="muted small">Each person picks their name on the shop tablet and enters their own 4-digit PIN. Their name is saved on every entry they make.</p>
+    <p class="muted small">Everyone who does services goes here, so you can pick who did each service. Give a 4-digit PIN to those who use the shop tablet; leave it empty for others.</p>
     <article class="card">
       ${list.length ? `<ul class="cat-subs">${list.map((x) => `
         <li class="cat-item ${x.active === false ? "hidden-item" : ""}">
-          <span>${esc(x.name)}${x.active === false ? ` <span class="muted small">(can't sign in)</span>` : ""}</span>
+          <span>${esc(x.name)}${x.active === false ? ` <span class="muted small">(hidden)</span>` : !x.pinHash ? ` <span class="muted small">(no PIN: not on tablet)</span>` : ""}</span>
           <button class="icon-btn small" data-act="staff-menu" data-id="${esc(x.id)}" aria-label="Options for ${esc(x.name)}">⋯</button>
         </li>`).join("")}</ul>` : `<p class="muted">No staff yet.</p>`}
     </article>
@@ -2162,13 +2184,13 @@ function renderStaffList() {
 
 function openStaffSheet(x = null) {
   openSheet(`
-    <h2>${x ? `Change PIN for ${esc(x.name)}` : "Add staff member"}</h2>
+    <h2>${x ? `${x.pinHash ? "Change PIN" : "Set PIN"} for ${esc(x.name)}` : "Add staff member"}</h2>
     <form id="staff-form" class="stack" novalidate>
       ${x ? "" : `<label class="field"><span>Name</span><input type="text" id="st-name" maxlength="30" autocomplete="off"></label>`}
-      <label class="field"><span>4-digit PIN</span><input type="password" id="st-pin" inputmode="numeric" maxlength="4" autocomplete="new-password"></label>
+      <label class="field"><span>4-digit PIN ${x ? "" : `<span class="muted">(only if they'll use the shop tablet)</span>`}</span><input type="password" id="st-pin" inputmode="numeric" maxlength="4" autocomplete="new-password"></label>
       <label class="field"><span>Type the PIN again</span><input type="password" id="st-pin2" inputmode="numeric" maxlength="4" autocomplete="new-password"></label>
       <p class="error" role="alert"></p>
-      ${x ? `<button type="button" class="btn ghost block" data-act="staff-toggle" data-id="${esc(x.id)}">${x.active === false ? "Allow to sign in again" : "Stop this person signing in"}</button>` : ""}
+      ${x ? `<button type="button" class="btn ghost block" data-act="staff-toggle" data-id="${esc(x.id)}">${x.active === false ? "Show again" : "Hide (left the parlour)"}</button>` : ""}
       <div class="row-btns">
         <button type="button" class="btn ghost" data-act="close-sheet">Cancel</button>
         <button type="submit" class="btn primary">Save</button>
@@ -2183,14 +2205,15 @@ function openStaffSheet(x = null) {
     const pin2 = document.getElementById("st-pin2").value.trim();
     if (!name) { err.textContent = "Enter a name."; return; }
     if (!x && state.staffList.some((s) => s.name.toLowerCase() === name.toLowerCase())) { err.textContent = "Someone with that name already exists."; return; }
-    if (!isValidPin(pin)) { err.textContent = "The PIN must be exactly 4 digits."; return; }
-    if (pin !== pin2) { err.textContent = "The two PINs don't match."; return; }
-    const pinSalt = newSalt();
-    const pinHash = await hashPin(pin, pinSalt);
+    const noPin = !x && !pin && !pin2;
+    if (!noPin && !isValidPin(pin)) { err.textContent = "The PIN must be exactly 4 digits (or leave both boxes empty)."; return; }
+    if (!noPin && pin !== pin2) { err.textContent = "The two PINs don't match."; return; }
+    const pinSalt = noPin ? null : newSalt();
+    const pinHash = noPin ? null : await hashPin(pin, pinSalt);
     if (x) updateDoc(doc(db, "staff", x.id), { pinSalt, pinHash }).catch(onWriteError);
     else setDoc(doc(collection(db, "staff")), { name, pinSalt, pinHash, active: true, createdAt: serverTimestamp() }).catch(onWriteError);
     closeSheet();
-    toast(x ? `PIN changed for ${name}.` : `${name} added.`);
+    toast(x ? `PIN saved for ${name}.` : `${name} added${noPin ? " (no tablet PIN)" : ""}.`);
   });
 }
 
@@ -2212,7 +2235,7 @@ function subscribeReport() {
   reportUnsub = onSnapshot(query(collection(db, "transactions"), where("date", ">=", `${key}-01`), where("date", "<=", `${key}-31`)), (snap) => {
     state.reportTxns = snap.docs.map((d) => ({ id: d.id, ...d.data({ serverTimestamps: "estimate" }) }));
     state.reportLoading = false;
-    if (cur().view === "reports") render();
+    if (cur().view === "reports" || cur().view === "staffReport") render();
   }, onLoadError);
 }
 
@@ -2223,6 +2246,7 @@ function reportTxnList() {
 function renderReports() {
   if (state.ui.reportTab === "services") return renderServiceReport();
   if (state.ui.reportTab === "customers") return renderCustomersReport();
+  if (state.ui.reportTab === "staff") return renderStaffReportList();
   const key = reportKey();
   const isCurrent = key === localDateStr().slice(0, 7);
   const r = monthReport(reportTxnList());
@@ -2451,10 +2475,11 @@ const PERIODS = [["m1", "This month"], ["m3", "Last 3 months"], ["m6", "Last 6 m
 
 function reportsHeader() {
   const t = state.ui.reportTab;
-  const tab = (id, label) => `<button class="chip ${t === id ? "on" : ""}" data-act="report-tab" data-tab="${id}" aria-pressed="${t === id}">${label}</button>`;
+  const tab = (id, label) => `<button class="chip small-chip ${t === id ? "on" : ""}" data-act="report-tab" data-tab="${id}" aria-pressed="${t === id}">${label}</button>`;
+  const titles = { pl: "Profit & loss", services: "Services", customers: "Customers", staff: "Staff" };
   return `
-  <header class="topbar"><div><p class="eyebrow">Reports</p><h1>${t === "services" ? "Services" : t === "customers" ? "Customers" : "Profit & loss"}</h1></div></header>
-  <div class="chips seg report-tabs" role="group" aria-label="Report">${tab("pl", "Profit & loss")}${tab("services", "Services")}${tab("customers", "Customers")}</div>`;
+  <header class="topbar"><div><p class="eyebrow">Reports</p><h1>${titles[t] || "Reports"}</h1></div></header>
+  <div class="chips seg report-tabs" role="group" aria-label="Report">${tab("pl", "Profit")}${tab("services", "Services")}${tab("customers", "Customers")}${tab("staff", "Staff")}</div>`;
 }
 
 function periodChips() {
@@ -2518,7 +2543,7 @@ function renderServiceReport() {
         <div class="rep-row head cols4"><span>Date</span><span>Customer</span><span>Service</span><span>Price</span></div>
         ${r.rows.map((x) => `
         <button class="rep-row cols4" data-act="open-txn" data-id="${esc(x.txnId)}">
-          <span>${esc(niceDate(x.date))}</span><span>${esc(clientById(x.clientId)?.name || x.clientName)}${x.staff ? `<br><span class="muted small">by ${esc(x.staff)}</span>` : ""}</span>
+          <span>${esc(niceDate(x.date))}</span><span>${esc(clientById(x.clientId)?.name || x.clientName)}${x.doneBy ? `<br><span class="muted small">done by ${esc(x.doneBy)}</span>` : ""}</span>
           <span>${esc(x.name)}</span><span>${formatRs(x.price)}</span>
         </button>`).join("")}
       </div>
@@ -2633,7 +2658,7 @@ function renderClientReport() {
         <li><button class="visit" data-act="open-txn" data-id="${esc(t.id)}">
           <span class="visit-date"><strong>${esc(niceDate(t.date, true))}</strong><span class="muted small">${esc(daysAgoText(t.date, today))}</span></span>
           <span class="visit-main">${t.kind === "sale"
-            ? (t.items || []).map((i) => `<span class="visit-item"><span>${esc(i.name)}</span><span>${formatRs(i.price)}</span></span>`).join("")
+            ? (t.items || []).map((i) => `<span class="visit-item"><span>${esc(i.name)}${i.doneByName ? ` <span class="muted small">· ${esc(i.doneByName)}</span>` : ""}</span><span>${formatRs(i.price)}</span></span>`).join("")
             : `<span class="visit-item"><span>Payment received</span><span>${formatRs(t.total)}</span></span>`}
             ${t.kind === "sale" ? `<span class="visit-total"><span>Total${dueText(t) ? ` · <span class="due">${esc(dueText(t))}</span>` : ""}</span><strong>${formatRs(t.total)}</strong></span>` : ""}
             ${t.createdByStaffName ? `<span class="muted small">by ${esc(t.createdByStaffName)}</span>` : ""}</span>
@@ -2645,7 +2670,7 @@ function renderClientReport() {
 Object.assign(actions, {
   "report-tab": (el) => {
     state.ui.reportTab = el.dataset.tab;
-    if (state.ui.reportTab !== "pl") subscribePeriod();
+    if (["services", "customers"].includes(state.ui.reportTab)) subscribePeriod();
     render(); window.scrollTo(0, 0);
   },
   "report-period": (el) => { state.ui.period = el.dataset.id; subscribePeriod(); render(); },
@@ -2654,18 +2679,107 @@ Object.assign(actions, {
   "client-report": (el) => go("clientReport", { id: el.dataset.id })
 });
 
+
+/* ---------- staff report (owner): who did which services in a month ---------- */
+function monthNav() {
+  const key = reportKey();
+  const isCurrent = key === localDateStr().slice(0, 7);
+  return `
+  <div class="month-nav">
+    <button class="icon-btn" data-act="report-month" data-delta="-1" aria-label="Previous month">◀</button>
+    <strong>${esc(monthName(key + "-01"))}</strong>
+    <button class="icon-btn" data-act="report-month" data-delta="1" aria-label="Next month" ${isCurrent ? "disabled" : ""}>▶</button>
+  </div>`;
+}
+const staffNameOf = (id, fallback) => (id === "none" ? "Not set" : (state.staffList.find((x) => x.id === id)?.name || fallback || "Staff"));
+
+function renderStaffReportList() {
+  const isCurrent = reportKey() === localDateStr().slice(0, 7);
+  const r = staffReport(reportTxnList());
+  const loading = state.reportLoading && !isCurrent;
+  $app.innerHTML = `
+  ${reportsHeader()}
+  <div class="reports">
+    ${monthNav()}
+    ${loading ? `<p class="muted">Loading…</p>` : !r.people.length ? `<div class="empty"><p>No services this month.</p></div>` : `
+    <div class="card rep-table">
+      <div class="rep-row head cols4"><span>Staff</span><span>Services</span><span>Customers</span><span>Revenue</span></div>
+      ${r.people.map((p) => `
+      <button class="rep-row cols4" data-act="staff-report" data-id="${esc(p.id)}">
+        <span><strong>${esc(staffNameOf(p.id, p.name))}</strong>${p.id === "none" ? `<br><span class="muted small">no name picked</span>` : ""}</span>
+        <span>${p.count}</span><span>${p.customers}</span><span>${formatRs(p.revenue)}</span>
+      </button>`).join("")}
+      <div class="rep-row cols4 total-row"><span><strong>Total</strong></span><span>${r.count}</span><span></span><span><strong>${formatRs(r.revenue)}</strong></span></div>
+    </div>
+    <p class="muted small">Each service counts for the person picked in "Done by" when the sale was entered. Tap a name for their month in detail.</p>`}
+  </div>`;
+}
+
+function renderStaffReportDetail() {
+  const id = cur().params.id;
+  const r = staffReport(reportTxnList());
+  const p = r.people.find((x) => x.id === id);
+  const name = staffNameOf(id, p?.name);
+  const today = localDateStr();
+  $app.innerHTML = `
+  ${topbar(name)}
+  <div class="reports">
+    ${monthNav()}
+    ${!p ? `<div class="empty"><p>No services by ${esc(name)} this month.</p></div>` : `
+    <article class="card stat-card">
+      <div class="stats">
+        <div><span class="muted small">Services done</span><strong>${p.count}</strong></div>
+        <div><span class="muted small">Revenue</span><strong class="income-text">${formatRs(p.revenue)}</strong></div>
+        <div><span class="muted small">Customers</span><strong>${p.customers}</strong></div>
+        <div><span class="muted small">Days worked</span><strong>${p.days}</strong></div>
+      </div>
+    </article>
+    <section>
+      <h2 class="section-title">By service</h2>
+      <div class="card rep-table">
+        <div class="rep-row head cols3"><span>Service</span><span>Times</span><span>Revenue</span></div>
+        ${p.byService.map((x) => `<div class="rep-row cols3"><span><strong>${esc(x.name)}</strong></span><span>${x.times}</span><span>${formatRs(x.revenue)}</span></div>`).join("")}
+      </div>
+    </section>
+    <section>
+      <h2 class="section-title">Every service</h2>
+      <div class="card rep-table">
+        <div class="rep-row head cols4"><span>Date</span><span>Customer</span><span>Service</span><span>Price</span></div>
+        ${p.rows.map((x) => `
+        <button class="rep-row cols4" data-act="open-txn" data-id="${esc(x.txnId)}">
+          <span>${esc(niceDate(x.date))}<br><span class="muted small">${esc(daysAgoText(x.date, today))}</span></span>
+          <span>${esc(clientById(x.clientId)?.name || x.clientName)}</span><span>${esc(x.name)}</span><span>${formatRs(x.price)}</span>
+        </button>`).join("")}
+      </div>
+    </section>`}
+  </div>`;
+}
+
+Object.assign(actions, {
+  "staff-report": (el) => go("staffReport", { id: el.dataset.id })
+});
+
 function askPriceAndAdd(mainId, subId) {
   const main = catById(mainId);
   const sub = subId ? catById(subId) : null;
   const name = sub ? sub.name : main?.name;
   const last = store.get("lastPrice", {})[subId || mainId];
   openPriceSheet({
-    title: `${name}: price`, initial: last || "", doneLabel: "Add service",
-    onDone: (price) => {
-      D().items.push({ categoryId: mainId, subCategoryId: subId, name, price });
+    title: `${name}: price`, initial: last || "", doneLabel: "Add service", doneBy: defaultDoneBy(),
+    onDone: (price, staffId) => {
+      const it = { categoryId: mainId, subCategoryId: subId, name, price };
+      setDoneBy(it, staffId);
+      D().items.push(it);
       render();
     }
   });
+}
+
+function setDoneBy(item, staffId) {
+  const x = staffId ? state.staffList.find((s) => s.id === staffId) : null;
+  item.doneById = x?.id || null;
+  item.doneByName = x?.name || null;
+  if (x && !isShop()) store.set("lastDoneBy", x.id);
 }
 
 document.addEventListener("click", (e) => {

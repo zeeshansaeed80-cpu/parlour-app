@@ -27,6 +27,8 @@
 | 21 | Staff permissions | Can: add sales, clients, paid-in-full expenses, client payments; see a client's balance; undo own entry ~30 s. Can't: see totals/reports/expense list/supplier balances, buy on credit, see client history, browse/edit/delete, settings |
 | 22 | Multi-service sales | One sale holds several services, one total, one receipt |
 | 23 | Service report (v4.1) | Pick service + period (this month / 3 / 6 months / this year): count, revenue, avg price, customers, every occurrence |
+| 25 | Done by (v4.2) | Each service in a sale records the staff member who did it (items[].doneById/doneByName); staff can exist without a tablet PIN |
+| 26 | Staff report (v4.2) | Per month: services, customers, revenue per staff + Not set; detail by service and every service |
 | 24 | Customer report (v4.1) | Per customer, all time: details, totals, services with last done, dated visit history; Call + WhatsApp buttons. Customers list per period. No automatic "due" reminders for now: owner picks manually |
 
 ## Data model (Firestore collections)
@@ -48,6 +50,7 @@
 4. **Polish** (done, v4.0): owner PIN lock per phone (fingerprint dropped at owner's request), tablet two-pane Clients/Suppliers, getting-started checklist, free-plan check in Settings, dark-mode checked
 
 5. **Service & customer reports** (done, v4.1)
+6. **Done by + staff report** (done, v4.2)
 
 ## WhatsApp readiness
 In place: international phone format, consent flag + date, tags/area/birthday fields, sales linked to clients.

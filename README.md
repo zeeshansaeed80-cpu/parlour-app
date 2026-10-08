@@ -1,4 +1,4 @@
-# Parlour Accounts (v4.1)
+# Parlour Accounts (v4.2)
 
 Income, expenses and clients for the parlour. A plain HTML/CSS/JS web app that installs
 to the home screen, works offline, and syncs through Firebase.
@@ -106,6 +106,16 @@ On iPhone/iPad: Safari → Share → **Add to Home Screen**.
    plus **Call** and **WhatsApp** buttons for reminding them yourself.
 Note: the Services and Customers reports read the sales in the chosen period, so "This year" reads more than
 "This month". The customer report always covers all of that customer's visits.
+
+## What to test (v4.2: who did the service + staff report)
+1. **Staff list:** Settings → Staff → add everyone who does services. Give a PIN only to people who use the shop
+   tablet; leave the PIN empty for others (they won't appear on the tablet's lock screen).
+2. **Done by:** in a sale, the price screen for each service shows staff names. Tap who did it.
+   It remembers the last person picked (on the tablet it starts with whoever unlocked it).
+   Tap a service in the sale to change its price or person.
+3. **Reports → Staff:** pick the month; each person's services, customers and revenue, plus "Not set" for
+   services with no name. Tap a name: totals per service and every service they did (date, customer, price).
+4. Entry details and the customer report also show who did each service.
 
 ## Free plan limits (checked Oct 2026)
 Firebase's free (Spark) plan: 50,000 reads, 20,000 writes and 20,000 deletes per day, 1 GiB storage.

@@ -217,7 +217,7 @@ export function serviceReport(txns, mainId, subId = null) {
     for (const it of t.items || []) {
       if (!itemMatches(it, mainId, subId)) continue;
       const price = toRupees(it.price);
-      rows.push({ txnId: t.id, date: t.date, clientId: t.clientId, clientName: t.clientName, name: it.name, price, staff: t.createdByStaffName || null });
+      rows.push({ txnId: t.id, date: t.date, clientId: t.clientId, clientName: t.clientName, name: it.name, price, doneBy: it.doneByName || null });
       const c = byClient.get(t.clientId) || { clientId: t.clientId, clientName: t.clientName, times: 0, spent: 0, lastDate: "" };
       c.times++; c.spent += price; if (t.date > c.lastDate) c.lastDate = t.date;
       byClient.set(t.clientId, c);
@@ -265,4 +265,31 @@ export function clientSummary(txns) {
     avg: sales.length ? Math.round(spent / sales.length) : 0,
     services: [...services.values()].sort((a, b) => (a.lastDate < b.lastDate ? 1 : a.lastDate > b.lastDate ? -1 : b.times - a.times))
   };
+}
+
+// Per staff member: the services they did (from each sale item's "Done by").
+export function staffReport(txns) {
+  const people = new Map();
+  let count = 0, revenue = 0;
+  for (const t of txns) {
+    if (t.kind !== "sale") continue;
+    for (const it of t.items || []) {
+      const id = it.doneById || "none";
+      const price = toRupees(it.price);
+      const p = people.get(id) || { id, name: it.doneByName || "Not set", count: 0, revenue: 0, clients: new Set(), dates: new Set(), services: new Map(), rows: [] };
+      p.count++; p.revenue += price; p.clients.add(t.clientId); p.dates.add(t.date);
+      const sk = it.subCategoryId || it.categoryId || it.name;
+      const sv = p.services.get(sk) || { name: it.name, times: 0, revenue: 0 };
+      sv.times++; sv.revenue += price; p.services.set(sk, sv);
+      p.rows.push({ txnId: t.id, date: t.date, clientId: t.clientId, clientName: t.clientName, name: it.name, price });
+      people.set(id, p);
+      count++; revenue += price;
+    }
+  }
+  const list = [...people.values()].map((p) => ({
+    id: p.id, name: p.name, count: p.count, revenue: p.revenue, customers: p.clients.size, days: p.dates.size,
+    byService: [...p.services.values()].sort((a, b) => b.revenue - a.revenue || b.times - a.times),
+    rows: p.rows.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0))
+  })).sort((a, b) => (a.id === "none") - (b.id === "none") || b.revenue - a.revenue);
+  return { people: list, count, revenue };
 }
