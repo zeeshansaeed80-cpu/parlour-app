@@ -181,3 +181,88 @@ export function shiftMonth(key, delta) {
   const d = new Date(y, m - 1 + delta, 1);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 }
+
+/* ---------- service & customer reports ---------- */
+export function daysBetween(fromDate, toDate) {
+  const [a, b] = [fromDate, toDate].map((s) => { const [y, m, d] = s.split("-").map(Number); return Date.UTC(y, m - 1, d); });
+  return Math.round((b - a) / 86400000);
+}
+export function daysAgoText(date, today) {
+  const n = daysBetween(date, today);
+  if (n <= 0) return "today";
+  if (n === 1) return "yesterday";
+  if (n < 60) return `${n} days ago`;
+  const months = Math.floor(n / 30);
+  return `${months} months ago`;
+}
+
+// Start date (YYYY-MM-DD) for a period preset, counted back from today.
+export function periodStart(period, today) {
+  const [y, m, d] = today.split("-").map(Number);
+  if (period === "y") return `${y}-01-01`;
+  if (period === "m1") return `${today.slice(0, 7)}-01`;
+  const back = period === "m6" ? 6 : 3;
+  const dt = new Date(y, m - 1 - back, d + 1);
+  return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`;
+}
+
+const itemMatches = (it, mainId, subId) => (subId ? it.subCategoryId === subId : it.categoryId === mainId);
+
+// Every time a service was done in the given sales.
+export function serviceReport(txns, mainId, subId = null) {
+  const rows = [];
+  const byClient = new Map();
+  for (const t of txns) {
+    if (t.kind !== "sale") continue;
+    for (const it of t.items || []) {
+      if (!itemMatches(it, mainId, subId)) continue;
+      const price = toRupees(it.price);
+      rows.push({ txnId: t.id, date: t.date, clientId: t.clientId, clientName: t.clientName, name: it.name, price, staff: t.createdByStaffName || null });
+      const c = byClient.get(t.clientId) || { clientId: t.clientId, clientName: t.clientName, times: 0, spent: 0, lastDate: "" };
+      c.times++; c.spent += price; if (t.date > c.lastDate) c.lastDate = t.date;
+      byClient.set(t.clientId, c);
+    }
+  }
+  rows.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
+  const revenue = rows.reduce((s, r) => s + r.price, 0);
+  const customers = [...byClient.values()].sort((a, b) => (a.lastDate < b.lastDate ? 1 : -1));
+  return { count: rows.length, revenue, avg: rows.length ? Math.round(revenue / rows.length) : 0, customers, rows };
+}
+
+// One line per customer who had a sale in the given transactions.
+export function customersReport(txns) {
+  const map = new Map();
+  for (const t of txns) {
+    if (t.kind !== "sale") continue;
+    const c = map.get(t.clientId) || { clientId: t.clientId, clientName: t.clientName, visits: 0, spent: 0, lastDate: "", lastServices: [] };
+    c.visits++; c.spent += toRupees(t.total);
+    if (t.date >= c.lastDate) { c.lastDate = t.date; c.lastServices = (t.items || []).map((i) => i.name); }
+    map.set(t.clientId, c);
+  }
+  return [...map.values()].sort((a, b) => (a.lastDate < b.lastDate ? 1 : a.lastDate > b.lastDate ? -1 : b.spent - a.spent));
+}
+
+// Full history summary for one customer (all their transactions).
+export function clientSummary(txns) {
+  const sales = txns.filter((t) => t.kind === "sale");
+  const paid = txns.filter((t) => t.kind === "clientPayment").reduce((s, t) => s + toRupees(t.total), 0);
+  const services = new Map();
+  let spent = 0, first = "", last = "";
+  for (const t of sales) {
+    spent += toRupees(t.total);
+    if (!first || t.date < first) first = t.date;
+    if (t.date > last) last = t.date;
+    for (const it of t.items || []) {
+      const key = it.subCategoryId || it.categoryId || it.name;
+      const s = services.get(key) || { name: it.name, times: 0, spent: 0, lastDate: "", lastPrice: 0 };
+      s.times++; s.spent += toRupees(it.price);
+      if (t.date >= s.lastDate) { s.lastDate = t.date; s.lastPrice = toRupees(it.price); }
+      services.set(key, s);
+    }
+  }
+  return {
+    visits: sales.length, spent, paidLater: paid, first, last,
+    avg: sales.length ? Math.round(spent / sales.length) : 0,
+    services: [...services.values()].sort((a, b) => (a.lastDate < b.lastDate ? 1 : a.lastDate > b.lastDate ? -1 : b.times - a.times))
+  };
+}

@@ -8,12 +8,13 @@ import {
   esc, formatRs, toRupees, localDateStr, monthRange, niceDate, monthName,
   normalizePhone, prettyPhone, receiptNo, totalsFor, searchClients, itemsTotal,
   clientBalanceText, balanceSummary, saleSplit, byNewest, MONTHS, birthdayText,
-  hashPin, newSalt, isValidPin, monthReport, shiftMonth
+  hashPin, newSalt, isValidPin, monthReport, shiftMonth,
+  daysAgoText, periodStart, serviceReport, customersReport, clientSummary
 } from "./util.js";
 import { receiptLines, drawReceipt, canvasToFile, shareOrDownload } from "./receipt.js";
 import { buildBackup } from "./backup.js";
 
-const APP_VERSION = "4.0.0";
+const APP_VERSION = "4.1.0";
 const BG_LOCK_MS = 2 * 60 * 1000; // owner app locks again after 2 minutes in the background
 const IDLE_LOCK_MS = 10 * 60 * 1000; // shop tablet locks after 10 minutes without use
 const UNDO_SECONDS = 30;
@@ -23,7 +24,7 @@ const $sheet = document.getElementById("sheet-root");
 const $toast = document.getElementById("toast-root");
 
 const TABS = ["home", "clients", "suppliers", "reports", "settings"];
-const LIVE_VIEWS = new Set(["home", "clients", "suppliers", "reports", "settings", "client", "supplier", "categories", "lists", "staffList", "staffHome"]);
+const LIVE_VIEWS = new Set(["clientReport", "home", "clients", "suppliers", "reports", "settings", "client", "supplier", "categories", "lists", "staffList", "staffHome"]);
 const ENTRY_VIEWS = new Set(["sale", "expense", "payment", "supplierPay", "clientForm", "supplierForm", "business"]);
 const PAD_VIEWS = new Set(["expense", "payment", "supplierPay"]);
 
@@ -49,12 +50,16 @@ const state = {
   online: navigator.onLine,
   setupMsg: null,
   stack: [{ view: "home", params: {}, draft: null }],
-  ui: { clientQ: "", clientFilter: null, catType: "income", reportMonth: null, paneClient: null, paneSupplier: null }
+  ui: {
+    clientQ: "", clientFilter: null, catType: "income", reportMonth: null, paneClient: null, paneSupplier: null,
+    reportTab: "pl", period: "m3", svcMain: null, svcSub: null, custQ: ""
+  }
 };
 let unsubs = [];
 let monthUnsub = null;
 let profileUnsub = null;
 let reportUnsub = null;
+let periodUnsub = null;
 const isShop = () => state.role === "shop";
 
 const cur = () => state.stack[state.stack.length - 1];
@@ -151,8 +156,9 @@ function watchProfile(kind, id) {
 function enterView() {
   closeSheet();
   const { view, params } = cur();
-  if (view === "reports") subscribeReport();
+  if (view === "reports") { subscribeReport(); if (state.ui.reportTab !== "pl") subscribePeriod(); }
   if (view === "client" || view === "supplier") watchProfile(view, params.id);
+  else if (view === "clientReport") watchProfile("client", params.id);
   else if (view === "clients" && isWide() && state.ui.paneClient) watchProfile("client", state.ui.paneClient);
   else if (view === "suppliers" && isWide() && state.ui.paneSupplier) watchProfile("supplier", state.ui.paneSupplier);
   else watchProfile(null);
@@ -183,6 +189,8 @@ function stopData() {
   if (profileUnsub) { profileUnsub(); profileUnsub = null; }
   watching = null;
   if (reportUnsub) { reportUnsub(); reportUnsub = null; }
+  if (periodUnsub) { periodUnsub(); periodUnsub = null; }
+  state.periodKey = null; state.periodTxns = [];
   Object.assign(state, {
     categories: [], lists: [], clients: [], suppliers: [], txns: [], profileTxns: [],
     business: {}, backupMeta: null, staffList: [], staff: null, role: null, locked: false,
@@ -341,7 +349,7 @@ function render() {
     client: renderClient, supplier: renderSupplier, clientForm: renderClientForm, supplierForm: renderSupplierForm,
     sale: renderSale, expense: renderExpense, payment: renderPayment, supplierPay: renderSupplierPay,
     categories: renderCategories, lists: renderLists, business: renderBusiness,
-    reports: renderReports, staffList: renderStaffList, staffHome: renderStaffHome
+    reports: renderReports, staffList: renderStaffList, staffHome: renderStaffHome, clientReport: renderClientReport
   };
   (views[v] || renderHome)();
   if (isTab) $app.insertAdjacentHTML("beforeend", tabbar(v));
@@ -641,6 +649,7 @@ function renderClient(paneId = null) {
         <button class="btn primary" data-act="pay-from-client" data-id="${esc(c.id)}">Receive payment</button>
       </div>
     </article>
+    <button class="btn ghost block" data-act="client-report" data-id="${esc(c.id)}">Full customer report</button>
     <article class="card">
       <dl class="details">
         <div><dt>Phone</dt><dd>${c.phone ? `${esc(prettyPhone(c.phone))} <a class="link" href="tel:${esc(c.phone)}">Call</a>` : "—"}</dd></div>
@@ -1750,7 +1759,7 @@ function closeSheet() {
 }
 
 function findTxn(id) {
-  return state.txns.find((x) => x.id === id) || state.profileTxns.find((x) => x.id === id) || state.reportTxns.find((x) => x.id === id);
+  return state.txns.find((x) => x.id === id) || state.profileTxns.find((x) => x.id === id) || state.reportTxns.find((x) => x.id === id) || (state.periodTxns || []).find((x) => x.id === id);
 }
 
 function openTxnSheet(id) {
@@ -2212,6 +2221,8 @@ function reportTxnList() {
 }
 
 function renderReports() {
+  if (state.ui.reportTab === "services") return renderServiceReport();
+  if (state.ui.reportTab === "customers") return renderCustomersReport();
   const key = reportKey();
   const isCurrent = key === localDateStr().slice(0, 7);
   const r = monthReport(reportTxnList());
@@ -2223,7 +2234,7 @@ function renderReports() {
     <li><button class="bal-row" data-act="${act}" data-id="${esc(x.id)}"><span>${esc(x.name)}</span><strong class="${cls}">${formatRs(Math.abs(amt(x)))}</strong></button></li>`).join("")}</ul>`
     : `<p class="muted small">None.</p>`;
   $app.innerHTML = `
-  <header class="topbar"><div><p class="eyebrow">Profit & loss</p><h1>Reports</h1></div></header>
+  ${reportsHeader()}
   <div class="reports">
     <div class="month-nav">
       <button class="icon-btn" data-act="report-month" data-delta="-1" aria-label="Previous month">◀</button>
@@ -2432,6 +2443,215 @@ Object.assign(actions, {
     toast("App lock turned off for this phone.");
   },
   "gs-dismiss": () => { store.set("gsDismissed", true); render(); }
+});
+
+
+/* ---------- service & customer reports (owner) ---------- */
+const PERIODS = [["m1", "This month"], ["m3", "Last 3 months"], ["m6", "Last 6 months"], ["y", "This year"]];
+
+function reportsHeader() {
+  const t = state.ui.reportTab;
+  const tab = (id, label) => `<button class="chip ${t === id ? "on" : ""}" data-act="report-tab" data-tab="${id}" aria-pressed="${t === id}">${label}</button>`;
+  return `
+  <header class="topbar"><div><p class="eyebrow">Reports</p><h1>${t === "services" ? "Services" : t === "customers" ? "Customers" : "Profit & loss"}</h1></div></header>
+  <div class="chips seg report-tabs" role="group" aria-label="Report">${tab("pl", "Profit & loss")}${tab("services", "Services")}${tab("customers", "Customers")}</div>`;
+}
+
+function periodChips() {
+  return `<div class="filter-row" role="group" aria-label="Period">${PERIODS.map(([id, label]) => `
+    <button class="chip small-chip ${state.ui.period === id ? "on" : ""}" data-act="report-period" data-id="${id}" aria-pressed="${state.ui.period === id}">${label}</button>`).join("")}</div>`;
+}
+
+// Sales from the start of the chosen period up to today (all kinds; reports pick what they need).
+function subscribePeriod() {
+  const today = localDateStr();
+  const start = periodStart(state.ui.period, today);
+  const key = `${start}..${today}`;
+  if (state.periodKey === key && periodUnsub) return;
+  if (periodUnsub) periodUnsub();
+  state.periodKey = key;
+  state.periodTxns = [];
+  state.periodLoading = true;
+  periodUnsub = onSnapshot(query(collection(db, "transactions"), where("date", ">=", start), where("date", "<=", today)), (snap) => {
+    state.periodTxns = snap.docs.map((d) => ({ id: d.id, ...d.data({ serverTimestamps: "estimate" }) }));
+    state.periodLoading = false;
+    if (cur().view === "reports") render();
+  }, onLoadError);
+}
+
+function renderServiceReport() {
+  const ui = state.ui;
+  const ms = state.categories.filter((c) => c.type === "income" && !c.parentId).sort(byOrder);
+  const subs = ui.svcMain ? state.categories.filter((c) => c.parentId === ui.svcMain).sort(byOrder) : [];
+  const main = ui.svcMain ? catById(ui.svcMain) : null;
+  const sub = ui.svcSub ? catById(ui.svcSub) : null;
+  const today = localDateStr();
+  let body = `<div class="empty"><p>Pick a service above to see its report.</p></div>`;
+  if (main && state.periodLoading) body = `<p class="muted">Loading…</p>`;
+  else if (main) {
+    const r = serviceReport(state.periodTxns, ui.svcMain, ui.svcSub);
+    const title = sub ? sub.name : `All ${main.name}`;
+    body = !r.count ? `<div class="empty"><p>No ${esc(title)} in this period.</p></div>` : `
+    <article class="card stat-card">
+      <h2>${esc(title)}</h2>
+      <div class="stats">
+        <div><span class="muted small">Times done</span><strong>${r.count}</strong></div>
+        <div><span class="muted small">Revenue</span><strong class="income-text">${formatRs(r.revenue)}</strong></div>
+        <div><span class="muted small">Average price</span><strong>${formatRs(r.avg)}</strong></div>
+        <div><span class="muted small">Customers</span><strong>${r.customers.length}</strong></div>
+      </div>
+    </article>
+    <section>
+      <h2 class="section-title">Customers who had it <span class="muted small">last visit first</span></h2>
+      <div class="card rep-table">
+        <div class="rep-row head cols4"><span>Customer</span><span>Times</span><span>Last done</span><span>Spent</span></div>
+        ${r.customers.map((c) => `
+        <button class="rep-row cols4" data-act="client-report" data-id="${esc(c.clientId)}">
+          <span><strong>${esc(clientById(c.clientId)?.name || c.clientName)}</strong></span><span>${c.times}</span>
+          <span>${esc(niceDate(c.lastDate))}<br><span class="muted small">${esc(daysAgoText(c.lastDate, today))}</span></span><span>${formatRs(c.spent)}</span>
+        </button>`).join("")}
+      </div>
+    </section>
+    <section>
+      <h2 class="section-title">Every time it was done</h2>
+      <div class="card rep-table">
+        <div class="rep-row head cols4"><span>Date</span><span>Customer</span><span>Service</span><span>Price</span></div>
+        ${r.rows.map((x) => `
+        <button class="rep-row cols4" data-act="open-txn" data-id="${esc(x.txnId)}">
+          <span>${esc(niceDate(x.date))}</span><span>${esc(clientById(x.clientId)?.name || x.clientName)}${x.staff ? `<br><span class="muted small">by ${esc(x.staff)}</span>` : ""}</span>
+          <span>${esc(x.name)}</span><span>${formatRs(x.price)}</span>
+        </button>`).join("")}
+      </div>
+    </section>`;
+  }
+  $app.innerHTML = `
+  ${reportsHeader()}
+  <div class="reports">
+    ${periodChips()}
+    <div class="block">
+      <div class="chips" role="group" aria-label="Service group">${ms.map((c) => `
+        <button class="chip main ${c.id === ui.svcMain ? "on" : ""}" data-act="svc-main" data-id="${esc(c.id)}" aria-pressed="${c.id === ui.svcMain}">${esc(c.name)}</button>`).join("")}</div>
+      ${main && subs.length ? `<div class="subs"><div class="chips" role="group" aria-label="Service">
+        <button class="chip sub ${!ui.svcSub ? "on" : ""}" data-act="svc-sub" data-id="" aria-pressed="${!ui.svcSub}">All ${esc(main.name)}</button>
+        ${subs.map((c) => `<button class="chip sub ${c.id === ui.svcSub ? "on" : ""}" data-act="svc-sub" data-id="${esc(c.id)}" aria-pressed="${c.id === ui.svcSub}">${esc(c.name)}</button>`).join("")}
+      </div></div>` : ""}
+    </div>
+    ${body}
+  </div>`;
+}
+
+function customerRowsHtml(list, today) {
+  const q = state.ui.custQ.trim().toLowerCase();
+  const shown = q ? list.filter((c) => (clientById(c.clientId)?.name || c.clientName || "").toLowerCase().includes(q)) : list;
+  if (!shown.length) return `<p class="muted pad">No customers match.</p>`;
+  return `
+  <div class="rep-row head cols4"><span>Customer</span><span>Visits</span><span>Last visit</span><span>Spent</span></div>
+  ${shown.map((c) => `
+  <button class="rep-row cols4" data-act="client-report" data-id="${esc(c.clientId)}">
+    <span><strong>${esc(clientById(c.clientId)?.name || c.clientName)}</strong><br><span class="muted small">${esc(c.lastServices.join(", "))}</span></span>
+    <span>${c.visits}</span>
+    <span>${esc(niceDate(c.lastDate))}<br><span class="muted small">${esc(daysAgoText(c.lastDate, today))}</span></span>
+    <span>${formatRs(c.spent)}</span>
+  </button>`).join("")}`;
+}
+
+function renderCustomersReport() {
+  const today = localDateStr();
+  const list = customersReport(state.periodTxns);
+  const total = list.reduce((s, c) => s + c.spent, 0);
+  $app.innerHTML = `
+  ${reportsHeader()}
+  <div class="reports">
+    ${periodChips()}
+    ${state.periodLoading ? `<p class="muted">Loading…</p>` : !list.length ? `<div class="empty"><p>No customer visits in this period.</p></div>` : `
+    <article class="card stat-card">
+      <div class="stats">
+        <div><span class="muted small">Customers</span><strong>${list.length}</strong></div>
+        <div><span class="muted small">Visits</span><strong>${list.reduce((s, c) => s + c.visits, 0)}</strong></div>
+        <div><span class="muted small">Spent</span><strong class="income-text">${formatRs(total)}</strong></div>
+      </div>
+    </article>
+    <input type="search" id="cust-q" class="search" placeholder="Search customer" value="${esc(state.ui.custQ)}" autocomplete="off" aria-label="Search customers">
+    <div class="card rep-table" id="cust-rows">${customerRowsHtml(list, today)}</div>
+    <p class="muted small">Tap a customer for their full report: every visit, each service and when it was last done.</p>`}
+  </div>`;
+  const q = document.getElementById("cust-q");
+  q?.addEventListener("input", () => { state.ui.custQ = q.value; document.getElementById("cust-rows").innerHTML = customerRowsHtml(list, today); });
+}
+
+function waLink(phone) { return phone ? `https://wa.me/${phone.replace(/\D/g, "")}` : ""; }
+
+function renderClientReport() {
+  const c = clientById(cur().params.id);
+  if (!c) { $app.innerHTML = `${topbar("Customer report")}<div class="empty"><p>This client was not found.</p></div>`; return; }
+  const today = localDateStr();
+  const txns = [...state.profileTxns].sort(byNewest);
+  const sum = clientSummary(txns);
+  const bal = toRupees(c.balance);
+  const bt = clientBalanceText(bal);
+  const tags = (c.tagIds || []).map(listName).filter(Boolean);
+  $app.innerHTML = `
+  ${topbar("Customer report")}
+  <div class="reports client-report">
+    <article class="card">
+      <h2 class="cr-name">${esc(c.name)}</h2>
+      <dl class="details">
+        <div><dt>Phone</dt><dd>${c.phone ? esc(prettyPhone(c.phone)) : "—"}</dd></div>
+        ${c.areaId ? `<div><dt>Area</dt><dd>${esc(listName(c.areaId))}</dd></div>` : ""}
+        ${birthdayText(c.birthday) ? `<div><dt>Birthday</dt><dd>${esc(birthdayText(c.birthday))}</dd></div>` : ""}
+        ${tags.length ? `<div><dt>Tags</dt><dd>${tags.map((t) => `<span class="tag">${esc(t)}</span>`).join(" ")}</dd></div>` : ""}
+        <div><dt>WhatsApp offers</dt><dd>${c.whatsappConsent === false ? "No, didn't agree" : "Yes, agreed"}</dd></div>
+        ${c.notes ? `<div><dt>Notes</dt><dd>${esc(c.notes)}</dd></div>` : ""}
+        <div><dt>Balance</dt><dd>${esc(bt.text)}</dd></div>
+      </dl>
+      ${c.phone ? `<div class="row-btns">
+        <a class="btn ghost" href="tel:${esc(c.phone)}">Call</a>
+        <a class="btn primary" href="${esc(waLink(c.phone))}" target="_blank" rel="noopener">WhatsApp</a>
+      </div>` : ""}
+    </article>
+    <article class="card stat-card">
+      <div class="stats">
+        <div><span class="muted small">Visits</span><strong>${sum.visits}</strong></div>
+        <div><span class="muted small">Total spent</span><strong class="income-text">${formatRs(sum.spent)}</strong></div>
+        <div><span class="muted small">Average visit</span><strong>${formatRs(sum.avg)}</strong></div>
+        <div><span class="muted small">Last visit</span><strong>${sum.last ? esc(daysAgoText(sum.last, today)) : "—"}</strong></div>
+      </div>
+      ${sum.first ? `<p class="muted small">Customer since ${esc(niceDate(sum.first, true))}${sum.last ? ` · last visit ${esc(niceDate(sum.last, true))}` : ""}</p>` : ""}
+    </article>
+    <section>
+      <h2 class="section-title">Services <span class="muted small">most recent first</span></h2>
+      ${sum.services.length ? `<div class="card rep-table">
+        <div class="rep-row head cols4"><span>Service</span><span>Times</span><span>Last done</span><span>Last price</span></div>
+        ${sum.services.map((x) => `
+        <div class="rep-row cols4"><span><strong>${esc(x.name)}</strong></span><span>${x.times}</span>
+          <span>${esc(niceDate(x.lastDate))}<br><span class="muted small">${esc(daysAgoText(x.lastDate, today))}</span></span><span>${formatRs(x.lastPrice)}</span></div>`).join("")}
+      </div>` : `<div class="empty"><p>No services yet.</p></div>`}
+    </section>
+    <section>
+      <h2 class="section-title">Visit history</h2>
+      ${txns.length ? `<ul class="visit-list">${txns.map((t) => `
+        <li><button class="visit" data-act="open-txn" data-id="${esc(t.id)}">
+          <span class="visit-date"><strong>${esc(niceDate(t.date, true))}</strong><span class="muted small">${esc(daysAgoText(t.date, today))}</span></span>
+          <span class="visit-main">${t.kind === "sale"
+            ? (t.items || []).map((i) => `<span class="visit-item"><span>${esc(i.name)}</span><span>${formatRs(i.price)}</span></span>`).join("")
+            : `<span class="visit-item"><span>Payment received</span><span>${formatRs(t.total)}</span></span>`}
+            ${t.kind === "sale" ? `<span class="visit-total"><span>Total${dueText(t) ? ` · <span class="due">${esc(dueText(t))}</span>` : ""}</span><strong>${formatRs(t.total)}</strong></span>` : ""}
+            ${t.createdByStaffName ? `<span class="muted small">by ${esc(t.createdByStaffName)}</span>` : ""}</span>
+        </button></li>`).join("")}</ul>` : `<div class="empty"><p>No visits yet.</p></div>`}
+    </section>
+  </div>`;
+}
+
+Object.assign(actions, {
+  "report-tab": (el) => {
+    state.ui.reportTab = el.dataset.tab;
+    if (state.ui.reportTab !== "pl") subscribePeriod();
+    render(); window.scrollTo(0, 0);
+  },
+  "report-period": (el) => { state.ui.period = el.dataset.id; subscribePeriod(); render(); },
+  "svc-main": (el) => { state.ui.svcMain = state.ui.svcMain === el.dataset.id ? null : el.dataset.id; state.ui.svcSub = null; render(); },
+  "svc-sub": (el) => { state.ui.svcSub = el.dataset.id || null; render(); },
+  "client-report": (el) => go("clientReport", { id: el.dataset.id })
 });
 
 function askPriceAndAdd(mainId, subId) {

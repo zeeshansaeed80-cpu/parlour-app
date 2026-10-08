@@ -515,3 +515,35 @@ body.has-tabbar #toast-root { bottom: calc(84px + env(safe-area-inset-bottom)); 
 .gs-step:disabled { opacity: 1; cursor: default; color: var(--muted); text-decoration: line-through; }
 .gs-check { width: 26px; height: 26px; border-radius: 50%; border: 2px solid var(--plum); display: grid; place-items: center; font-weight: 800; color: var(--plum-ink); }
 .gs-step.done .gs-check { background: var(--plum); border-color: var(--plum); }
+
+/* ===================== Reports: services & customers ===================== */
+.report-tabs { margin: -4px 0 6px; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+.report-tabs .chip { flex: none; }
+.stat-card h2 { margin-bottom: 10px; }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; }
+.stats > div { display: grid; gap: 2px; padding: 10px 12px; border-radius: 12px; background: var(--surface-2); }
+.stats strong { font-size: 1.25rem; }
+.rep-table { padding: 4px 0; overflow: hidden; }
+.rep-row {
+  width: 100%; display: grid; gap: 8px; align-items: center; min-height: 52px;
+  padding: 8px 14px; border: 0; border-top: 1px solid var(--line); background: transparent; text-align: left; font-size: .92rem;
+}
+.rep-row.cols4 { grid-template-columns: 1.6fr .6fr 1.2fr .9fr; }
+.rep-row > span:last-child { text-align: right; }
+.rep-row.head { min-height: 36px; border-top: 0; color: var(--muted); font-size: .78rem; font-weight: 700; }
+button.rep-row:active { background: var(--plum-soft); }
+.client-report .cr-name { font-size: 1.3rem; margin-bottom: 10px; }
+.client-report a.btn { display: inline-flex; align-items: center; justify-content: center; text-decoration: none; }
+.visit-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.visit {
+  width: 100%; display: grid; grid-template-columns: 112px 1fr; gap: 12px; align-items: start; text-align: left;
+  padding: 12px 14px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+}
+.visit-date { display: grid; gap: 2px; }
+.visit-main { display: grid; gap: 4px; }
+.visit-item, .visit-total { display: flex; justify-content: space-between; gap: 10px; }
+.visit-total { border-top: 1px dashed var(--line); padding-top: 4px; margin-top: 2px; }
+@media (max-width: 380px) {
+  .rep-row { font-size: .84rem; padding: 8px 10px; gap: 6px; }
+  .visit { grid-template-columns: 1fr; gap: 6px; }
+}

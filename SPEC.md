@@ -26,6 +26,8 @@
 | 20 | Backup | Daily backup file, shareable to Google Drive. A home-screen banner asks once a day; one tap saves it (browsers can't save files with no tap at all) |
 | 21 | Staff permissions | Can: add sales, clients, paid-in-full expenses, client payments; see a client's balance; undo own entry ~30 s. Can't: see totals/reports/expense list/supplier balances, buy on credit, see client history, browse/edit/delete, settings |
 | 22 | Multi-service sales | One sale holds several services, one total, one receipt |
+| 23 | Service report (v4.1) | Pick service + period (this month / 3 / 6 months / this year): count, revenue, avg price, customers, every occurrence |
+| 24 | Customer report (v4.1) | Per customer, all time: details, totals, services with last done, dated visit history; Call + WhatsApp buttons. Customers list per period. No automatic "due" reminders for now: owner picks manually |
 
 ## Data model (Firestore collections)
 - **categories**: type (income/expense), name, parentId, sortOrder, active
@@ -44,6 +46,8 @@
 2. **Clients & balances** (done, v2.0): client list/profile/tags/areas, partial payments & advances, suppliers, category & list manager, receipt sharing, daily backup file
 3. **Shop tablet & reports** (done, v3.0): shop account, staff PINs, staff home, server-enforced staff limits, P&L and balance reports
 4. **Polish** (done, v4.0): owner PIN lock per phone (fingerprint dropped at owner's request), tablet two-pane Clients/Suppliers, getting-started checklist, free-plan check in Settings, dark-mode checked
+
+5. **Service & customer reports** (done, v4.1)
 
 ## WhatsApp readiness
 In place: international phone format, consent flag + date, tags/area/birthday fields, sales linked to clients.

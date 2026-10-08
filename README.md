@@ -1,4 +1,4 @@
-# Parlour Accounts (Stage 4)
+# Parlour Accounts (v4.1)
 
 Income, expenses and clients for the parlour. A plain HTML/CSS/JS web app that installs
 to the home screen, works offline, and syncs through Firebase.
@@ -94,6 +94,18 @@ On iPhone/iPad: Safari → Share → **Add to Home Screen**.
    Each phone has its own app lock; the shop tablet keeps using staff PINs.
 3. **Tablet layout:** on a tablet (landscape), Clients and Suppliers show the list on the left and details on the right.
 4. **Free plan check:** Settings shows roughly how many fresh app starts a day the free plan allows with your data.
+
+## What to test (v4.1: service & customer reports)
+1. **Reports → Services:** pick a period (this month / 3 months / 6 months / this year), then a service group
+   (e.g. Skin) and a service (e.g. Facial, or "All Skin"). Shows times done, revenue, average price, customers,
+   which customers had it (last visit first) and every time it was done (tap a row to open the sale).
+2. **Reports → Customers:** every customer who visited in the period with visits, last visit ("23 days ago"),
+   what they had last time and total spent. Search by name. Tap a customer for the full report.
+3. **Customer report** (also from a client's profile → "Full customer report"): details, visits, total spent,
+   average visit, customer since, each service with times / last done / last price, full visit history,
+   plus **Call** and **WhatsApp** buttons for reminding them yourself.
+Note: the Services and Customers reports read the sales in the chosen period, so "This year" reads more than
+"This month". The customer report always covers all of that customer's visits.
 
 ## Free plan limits (checked Oct 2026)
 Firebase's free (Spark) plan: 50,000 reads, 20,000 writes and 20,000 deletes per day, 1 GiB storage.

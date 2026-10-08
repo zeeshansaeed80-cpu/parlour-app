@@ -1,6 +1,6 @@
 // Service worker: keeps a copy of the app on the device so it opens without internet.
 // Bump VERSION whenever you change any app file, so devices pick up the new copy.
-const VERSION = "parlour-v4.0.0";
+const VERSION = "parlour-v4.1.0";
 const SDK = "https://www.gstatic.com/firebasejs/12.19.0/";
 
 const SHELL = [
