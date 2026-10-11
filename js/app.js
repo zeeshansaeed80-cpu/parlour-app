@@ -1,7 +1,7 @@
 import {
   auth, db, SHOP_EMAIL, onAuthStateChanged, signInWithEmailAndPassword, signOut,
   collection, doc, setDoc, updateDoc, deleteDoc, getDoc, getDocFromCache, onSnapshot,
-  query, where, writeBatch, serverTimestamp, increment
+  query, where, writeBatch, serverTimestamp, increment, arrayUnion
 } from "./firebase.js";
 import { buildDefaultCategories, DEFAULT_PAYMENT_METHODS, DEFAULT_TAGS, SEED_VERSION } from "./seed.js";
 import {
@@ -9,12 +9,12 @@ import {
   normalizePhone, prettyPhone, receiptNo, totalsFor, searchClients, itemsTotal,
   clientBalanceText, balanceSummary, saleSplit, byNewest, MONTHS, birthdayText,
   hashPin, newSalt, isValidPin, monthReport, shiftMonth,
-  daysAgoText, periodStart, serviceReport, customersReport, clientSummary, staffReport, expenseBreakdown
+  daysAgoText, periodStart, serviceReport, customersReport, clientSummary, staffReport, expenseBreakdown, describeChanges
 } from "./util.js";
 import { receiptLines, drawReceipt, canvasToFile, shareOrDownload } from "./receipt.js";
 import { buildBackup } from "./backup.js";
 
-const APP_VERSION = "4.3.1";
+const APP_VERSION = "4.4.0";
 const BG_LOCK_MS = 2 * 60 * 1000; // owner app locks again after 2 minutes in the background
 const IDLE_LOCK_MS = 10 * 60 * 1000; // shop tablet locks after 10 minutes without use
 
@@ -219,6 +219,7 @@ function startData() {
     sub(collection(db, "lists"), (snap) => { state.lists = snap.docs.map((d) => ({ id: d.id, ...d.data() })); dataChanged(); });
     sub(collection(db, "clients"), (snap) => { state.clients = snap.docs.map((d) => ({ id: d.id, ...d.data() })).sort(byName); dataChanged(); });
     sub(doc(db, "meta", "business"), (snap) => { state.business = snap.exists() ? snap.data() : {}; dataChanged(); });
+    subscribeShopToday();
     return;
   }
   ensureSeed();
@@ -1102,7 +1103,8 @@ function bindDateAndNote() {
 function baseTxn() {
   return {
     createdAt: serverTimestamp(), createdByUser: state.user.uid,
-    createdByStaff: state.staff?.id || null, createdByStaffName: state.staff?.name || null
+    createdByStaff: state.staff?.id || null, createdByStaffName: state.staff?.name || null,
+    createdByEmail: isShop() ? null : (state.user?.email || null)
   };
 }
 
@@ -1637,8 +1639,13 @@ function commitEntry(d, data, target) {
   if (d.editing) {
     const old = d.editing;
     id = old.id;
-    const { createdAt, createdByUser, createdByStaff, createdByStaffName, receiptNo: _r, ...rest } = data;
-    batch.update(doc(db, "transactions", id), { ...rest, editedAt: serverTimestamp(), editedBy: state.user?.email || null });
+    const { createdAt, createdByUser, createdByStaff, createdByStaffName, createdByEmail, receiptNo: _r, ...rest } = data;
+    const who = isShop() ? (state.staff?.name || "Staff") : (state.user?.email || "Owner");
+    const logEntry = {
+      at: new Date().toISOString(), by: who, byType: isShop() ? "staff" : "owner", staffId: state.staff?.id || null,
+      changes: old.before ? describeChanges(old.before, data, methodName) : []
+    };
+    batch.update(doc(db, "transactions", id), { ...rest, editedAt: serverTimestamp(), editedBy: who, editLog: arrayUnion(logEntry) });
     if (old.clientId && (old.kind === "sale" || old.kind === "clientPayment")) add("clients", old.clientId, "balance", -old.balanceDelta);
     if (old.supplierId && (old.kind === "expense" || old.kind === "supplierPayment")) add("suppliers", old.supplierId, "balanceOwed", -old.balanceDelta);
   } else {
@@ -1822,17 +1829,41 @@ function openTxnSheet(id) {
       <div><dt>Date</dt><dd>${esc(niceDate(t.date, true))}</dd></div>
       ${t.note ? `<div><dt>Note</dt><dd>${esc(t.note)}</dd></div>` : ""}
       ${t.receiptNo ? `<div><dt>Receipt no.</dt><dd>${esc(t.receiptNo)}</dd></div>` : ""}
-      <div><dt>Entered by</dt><dd>${t.createdByStaffName ? `${esc(t.createdByStaffName)} <span class="muted small">(shop tablet)</span>` : "Owner"}</dd></div>
       <div><dt>Status</dt><dd>${t._pending ? "Saved on this device, waiting to sync" : "Synced"}</dd></div>
     </dl>
-    ${t.editedAt ? `<p class="muted small">Edited${t.editedBy ? ` by ${esc(t.editedBy)}` : ""}.</p>` : ""}
+    ${historyLog(t)}
     <div class="row-btns">
-      ${isShop() ? "" : `<button class="btn ghost" data-act="edit-txn" data-id="${esc(t.id)}">Edit</button>`}
-      <button class="btn ghost danger" data-act="delete-txn" data-id="${esc(t.id)}">Delete entry</button>
+      ${canEdit(t) ? `<button class="btn ghost" data-act="edit-txn" data-id="${esc(t.id)}">Edit</button>` : ""}
+      ${isShop() ? "" : `<button class="btn ghost danger" data-act="delete-txn" data-id="${esc(t.id)}">Delete entry</button>`}
       ${t.kind === "sale" || t.kind === "clientPayment" ? `<button class="btn ghost" data-act="txn-receipt" data-id="${esc(t.id)}">Receipt</button>` : ""}
       <button class="btn primary" data-act="close-sheet">Close</button>
     </div>
-    ${t.balanceDelta ? `<p class="muted small">Deleting also undoes its effect on the ${t.clientId ? "client's" : "supplier's"} balance.</p>` : ""}`);
+    ${t.balanceDelta && !isShop() ? `<p class="muted small">Deleting also undoes its effect on the ${t.clientId ? "client's" : "supplier's"} balance.</p>` : ""}`);
+}
+
+// Staff may edit only their own tablet entries from today; owners may edit anything.
+function canEdit(t) {
+  if (!isShop()) return true;
+  return !!state.staff && t.createdByStaff === state.staff.id && t.date === localDateStr()
+    && ["sale", "clientPayment", "expense"].includes(t.kind) && !(t.kind === "expense" && t.supplierId);
+}
+
+function timeOf(v) {
+  const d = v?.toDate ? v.toDate() : (typeof v === "string" ? new Date(v) : null);
+  if (!d || isNaN(d)) return "";
+  return d.toLocaleString("en-GB", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" });
+}
+
+function historyLog(t) {
+  const creator = t.createdByStaffName ? `${t.createdByStaffName} (shop tablet)` : (t.createdByEmail ? `Owner (${t.createdByEmail})` : "Owner");
+  const lines = [`<li><span class="log-what"><strong>Created</strong> by ${esc(creator)}</span><span class="muted small">${esc(timeOf(t.createdAt))}</span></li>`];
+  for (const e of t.editLog || []) {
+    const by = e.byType === "staff" ? `${e.by} (shop tablet)` : `Owner (${e.by})`;
+    lines.push(`<li><span class="log-what"><strong>Edited</strong> by ${esc(by)}</span><span class="muted small">${esc(timeOf(e.at))}</span>
+      ${(e.changes || []).length ? `<ul class="log-changes">${e.changes.map((c) => `<li>${esc(c)}</li>`).join("")}</ul>` : `<span class="muted small">No details recorded.</span>`}</li>`);
+  }
+  if (!t.editLog?.length && t.editedAt) lines.push(`<li><span class="log-what"><strong>Edited</strong>${t.editedBy ? ` by ${esc(t.editedBy)}` : ""}</span><span class="muted small">${esc(timeOf(t.editedAt))}</span></li>`);
+  return `<div class="entry-log"><p class="muted small label">History</p><ul>${lines.join("")}</ul></div>`;
 }
 
 /* ---------- toast ---------- */
@@ -2069,7 +2100,9 @@ const actions = {
   "remove-item": (el) => { D().items.splice(Number(el.dataset.i), 1); render(); },
   "pay-mode": (el) => {
     const d = D();
+    const switching = d.payMode !== el.dataset.mode;
     d.payMode = el.dataset.mode;
+    if (switching && d.payMode === "part") d.partPaid = 0; // start the amount from 0
     render();
     if (d.payMode === "part") {
       const max = d.type === "sale" ? saleNumbers(d).collect : toRupees(d.amount || 0);
@@ -2179,6 +2212,7 @@ function renderStaffHome() {
     <button class="big expense" data-act="new-expense"><span class="big-sign" aria-hidden="true">−</span>New expense</button>
     <button class="big soft" data-act="add-client"><span class="big-sign" aria-hidden="true">☺</span>New client</button>
   </div>
+  ${staffTodayList()}
   <p class="muted small center staff-note">Tap <strong>Lock</strong> when you're done. The tablet also locks itself after 10 minutes.</p>`;
 }
 
@@ -2803,7 +2837,8 @@ function openEdit(t) {
   closeSheet();
   const editing = {
     id: t.id, kind: t.kind, clientId: t.clientId || null, supplierId: t.supplierId || null,
-    balanceDelta: toRupees(t.balanceDelta || 0), receiptNo: t.receiptNo || null
+    balanceDelta: toRupees(t.balanceDelta || 0), receiptNo: t.receiptNo || null,
+    before: { ...t }
   };
   const base = { editing, date: t.date, note: t.note || "", methodId: t.paymentMethodId || defaultMethodId() };
   const clientOf = () => {
@@ -2896,6 +2931,37 @@ function openExpenseCategory(catId) {
 Object.assign(actions, {
   "exp-cat": (el) => openExpenseCategory(el.dataset.id)
 });
+
+
+/* ---------- shop tablet: the signed-in staff member's entries today ---------- */
+let shopUnsub = null;
+function subscribeShopToday() {
+  const today = localDateStr();
+  if (state.shopDay === today && shopUnsub) return;
+  if (shopUnsub) shopUnsub();
+  state.shopDay = today;
+  // The server only lets the shop login read entries it created itself.
+  shopUnsub = onSnapshot(query(collection(db, "transactions"), where("createdByUser", "==", state.user.uid), where("date", "==", today)),
+    { includeMetadataChanges: true }, (snap) => {
+      state.txns = snap.docs.map((d) => ({ id: d.id, ...d.data({ serverTimestamps: "estimate" }), _pending: d.metadata.hasPendingWrites }));
+      dataChanged();
+    }, onLoadError);
+  unsubs.push(() => { if (shopUnsub) { shopUnsub(); shopUnsub = null; } state.shopDay = null; });
+}
+
+function staffTodayList() {
+  if (!state.staff) return "";
+  subscribeShopToday();
+  const mine = state.txns.filter((t) => t.createdByStaff === state.staff.id && t.date === localDateStr())
+    .sort((a, b) => createdMs(b) - createdMs(a));
+  return `
+  <section class="staff-today">
+    <h2 class="section-title">Your entries today <span class="muted small">${mine.length || ""}</span></h2>
+    ${mine.length ? `<ul class="txn-list">${mine.map((t) => txnRow(t)).join("")}</ul>
+      <p class="muted small">Made a mistake? Tap the entry → <strong>Edit</strong>. Every change is recorded.</p>`
+      : `<p class="muted small">Entries you save today appear here, so you can fix mistakes.</p>`}
+  </section>`;
+}
 
 function askPriceAndAdd(mainId, subId) {
   const main = catById(mainId);

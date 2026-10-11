@@ -327,3 +327,20 @@ export function expenseBreakdown(txns, prevTxns, nameOf) {
   }).sort((a, b) => b.amount - a.amount || b.prev - a.prev);
   return { total: now.total, prevTotal: prev.total, rows };
 }
+
+// A short, readable list of what changed when an entry is edited (for the entry's log).
+export function describeChanges(oldT, newT, methodNameOf = () => "") {
+  const out = [];
+  const rs = (v) => formatRs(v);
+  const itemText = (items) => (items || []).map((i) => `${i.name} ${rs(i.price)}${i.doneByName ? ` (${i.doneByName})` : ""}`).join(", ");
+  if ((oldT.clientName || "") !== (newT.clientName || "") && (oldT.clientName || newT.clientName)) out.push(`Client: ${oldT.clientName || "—"} → ${newT.clientName || "—"}`);
+  if ((oldT.supplierName || "") !== (newT.supplierName || "") && (oldT.supplierName || newT.supplierName)) out.push(`Supplier: ${oldT.supplierName || "none"} → ${newT.supplierName || "none"}`);
+  if (oldT.kind === "expense" && (oldT.label || "") !== (newT.label || "")) out.push(`Category: ${oldT.label || "—"} → ${newT.label || "—"}`);
+  if (oldT.kind === "sale" && itemText(oldT.items) !== itemText(newT.items)) out.push(`Services: ${itemText(oldT.items) || "—"} → ${itemText(newT.items) || "—"}`);
+  if (toRupees(oldT.total) !== toRupees(newT.total)) out.push(`Total: ${rs(oldT.total)} → ${rs(newT.total)}`);
+  if (oldT.kind !== "clientPayment" && oldT.kind !== "supplierPayment" && toRupees(oldT.paidNow) !== toRupees(newT.paidNow)) out.push(`Paid now: ${rs(oldT.paidNow)} → ${rs(newT.paidNow)}`);
+  if ((oldT.paymentMethodId || null) !== (newT.paymentMethodId || null)) out.push(`Paid by: ${methodNameOf(oldT.paymentMethodId) || "—"} → ${methodNameOf(newT.paymentMethodId) || "—"}`);
+  if (oldT.date !== newT.date) out.push(`Date: ${oldT.date} → ${newT.date}`);
+  if ((oldT.note || "") !== (newT.note || "")) out.push(`Note: "${oldT.note || ""}" → "${newT.note || ""}"`);
+  return out;
+}

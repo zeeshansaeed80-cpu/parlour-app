@@ -574,3 +574,12 @@ button.rep-row:active { background: var(--plum-soft); }
 .small-title { font-size: .95rem; margin-top: 16px; }
 /* when a bottom sheet is open, show messages at the top so they never cover its buttons */
 body.sheet-open #toast-root { top: calc(12px + env(safe-area-inset-top)); bottom: auto; }
+
+/* ===================== Entry history log ===================== */
+.entry-log { margin-top: 14px; padding: 10px 12px; border-radius: 12px; background: var(--surface-2); }
+.entry-log .label { margin: 0 0 6px; }
+.entry-log > ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.entry-log > ul > li { display: grid; gap: 2px; font-size: .9rem; }
+.log-what { display: block; }
+.log-changes { margin: 2px 0 0; padding-left: 18px; font-size: .85rem; color: var(--muted); }
+.staff-today { margin-top: 18px; }

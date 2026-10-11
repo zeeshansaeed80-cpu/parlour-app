@@ -9,7 +9,7 @@ import {
 import {
   initializeFirestore, persistentLocalCache, persistentMultipleTabManager,
   collection, doc, setDoc, updateDoc, deleteDoc, getDoc, getDocs, getDocFromCache, onSnapshot,
-  query, where, writeBatch, serverTimestamp, increment
+  query, where, writeBatch, serverTimestamp, increment, arrayUnion
 } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js";
 
 const firebaseConfig = {
@@ -36,5 +36,5 @@ export const db = initializeFirestore(app, {
 export {
   SDK, onAuthStateChanged, signInWithEmailAndPassword, signOut,
   collection, doc, setDoc, updateDoc, deleteDoc, getDoc, getDocs, getDocFromCache, onSnapshot,
-  query, where, writeBatch, serverTimestamp, increment
+  query, where, writeBatch, serverTimestamp, increment, arrayUnion
 };

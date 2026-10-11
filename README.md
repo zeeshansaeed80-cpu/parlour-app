@@ -1,4 +1,4 @@
-# Parlour Accounts (v4.3.1)
+# Parlour Accounts (v4.4)
 
 Income, expenses and clients for the parlour. A plain HTML/CSS/JS web app that installs
 to the home screen, works offline, and syncs through Firebase.
@@ -81,7 +81,7 @@ On iPhone/iPad: Safari → Share → **Add to Home Screen**.
 1. **Reports tab (owner):** this month's income, expenses and profit; day-by-day rows (tap a day to see its entries);
    ◀ ▶ to change month; lists of who owes you, advances and what you owe suppliers.
 2. **Staff:** on the tablet, pick a name, enter a wrong PIN (refused), then the right one.
-3. Staff can: New sale, Receive payment, New expense (paid in full only), New client. Mistakes are fixed by an owner (Edit).
+3. Staff can: New sale, Receive payment, New expense (paid in full only), New client, and edit their own entries from today (v4.4).
    Staff can't: see totals, reports, the client list, suppliers, settings, or change the date.
 4. **Lock:** tap Lock; the tablet also locks itself after 10 minutes without use.
 5. **Owner phone:** tap a staff entry → "Entered by <name> (shop tablet)".
@@ -124,6 +124,15 @@ Note: the Services and Customers reports read the sales in the chosen period, so
    Owners only; the shop tablet can't edit.
 2. **Where the money went** (Reports → Profit): expenses by group with a bar, share of the month, and the change
    vs last month. Tap a group: its parts (e.g. Electricity, Gas) and every expense in it (tap one to edit).
+
+## What to test (v4.4: staff edits + history log)
+**Publish the new firestore.rules first** (they allow staff edits and nothing more).
+1. On the tablet, after saving, the staff home shows **Your entries today** (only that person's own entries).
+2. Tap one → **Edit** → change → **Save changes**. Staff can't delete, can't change the date, and can't edit
+   other people's entries or anything from a previous day.
+3. Every entry has a **History**: who created it (staff name on the tablet, or the owner's email) and every
+   edit, with who made it, when, and what changed (e.g. "Total: Rs 300 → Rs 1,900").
+4. Owners see the same history on their phones and can still edit or delete anything.
 
 ## Free plan limits (checked Oct 2026)
 Firebase's free (Spark) plan: 50,000 reads, 20,000 writes and 20,000 deletes per day, 1 GiB storage.

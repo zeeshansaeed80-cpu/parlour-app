@@ -1,6 +1,6 @@
 rules_version = '2';
 
-// Stage 3 security rules.
+// Security rules (v4.4).
 // - Owners (emails below) can read and change everything.
 // - The shop tablet login can only do what staff are allowed to do. This is
 //   enforced here on the server, so it can't be bypassed from the tablet.
@@ -45,19 +45,37 @@ service cloud.firestore {
         && d.createdAt == request.time;
     }
 
+    // Staff (shop tablet) editing an entry: only entries the tablet created, within a day of
+    // creating them, same kind and date, still paid in full for expenses, who-created-it unchanged,
+    // and exactly one new line added to the entry's edit log.
+    function validStaffEdit() {
+      let d = request.resource.data;
+      let o = resource.data;
+      return o.createdByUser == request.auth.uid
+        && request.time < o.createdAt + duration.value(1, 'd')
+        && d.kind == o.kind && d.kind in ['sale', 'clientPayment', 'expense']
+        && d.date == o.date
+        && (d.kind != 'expense' || (d.paidNow == d.total && d.supplierId == null))
+        && d.createdByUser == o.createdByUser
+        && d.createdByStaff == o.createdByStaff
+        && d.createdAt == o.createdAt
+        && d.editLog is list
+        && d.editLog.size() == o.get('editLog', []).size() + 1
+        && d.editLog[d.editLog.size() - 1].byType == 'staff';
+    }
+
     function validClient() {
       let d = request.resource.data;
       return d.name is string && d.name.size() > 0 && d.phone is string && d.balance is int;
     }
 
     match /transactions/{id} {
-      allow read: if isOwner();
+      // The shop tablet can only read entries it created itself (to show staff their own entries).
+      allow read: if isOwner() || (isShop() && resource.data.createdByUser == request.auth.uid);
       allow create: if validTxn() && (isOwner() || (isShop() && validStaffTxn()));
-      allow update: if isOwner() && validTxn();
-      // Staff can only undo their own entry, shortly after saving it.
-      allow delete: if isOwner()
-        || (isShop() && resource.data.createdByUser == request.auth.uid
-            && request.time < resource.data.createdAt + duration.value(10, 'm'));
+      allow update: if validTxn() && (isOwner() || (isShop() && validStaffEdit()));
+      // Only owners can delete.
+      allow delete: if isOwner();
     }
 
     match /clients/{id} {
