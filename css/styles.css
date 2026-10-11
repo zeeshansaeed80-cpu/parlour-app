@@ -556,3 +556,21 @@ button.rep-row:active { background: var(--plum-soft); }
 .report-tabs { gap: 6px; }
 .report-tabs .chip { padding: 6px 12px; }
 .report-tabs .chip.on::before { content: ""; }
+
+/* ===================== Expense breakdown ===================== */
+.exp-head { display: flex; justify-content: space-between; align-items: flex-end; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
+.exp-head > div { display: grid; }
+.exp-head strong { font-size: 1.35rem; }
+.exp-list { list-style: none; margin: 0; padding: 0; }
+.exp-row {
+  width: 100%; display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; align-items: center;
+  padding: 10px 0; border: 0; border-top: 1px solid var(--line); background: transparent; text-align: left;
+}
+.exp-row.static { list-style: none; }
+.exp-name { display: grid; min-width: 0; }
+.exp-amt { font-weight: 700; white-space: nowrap; }
+.exp-bar { grid-column: 1 / -1; height: 8px; border-radius: 4px; background: var(--surface-2); overflow: hidden; }
+.exp-bar > span { display: block; height: 100%; border-radius: 4px; background: var(--expense); }
+.small-title { font-size: .95rem; margin-top: 16px; }
+/* when a bottom sheet is open, show messages at the top so they never cover its buttons */
+body.sheet-open #toast-root { top: calc(12px + env(safe-area-inset-top)); bottom: auto; }

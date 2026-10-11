@@ -9,12 +9,12 @@ import {
   normalizePhone, prettyPhone, receiptNo, totalsFor, searchClients, itemsTotal,
   clientBalanceText, balanceSummary, saleSplit, byNewest, MONTHS, birthdayText,
   hashPin, newSalt, isValidPin, monthReport, shiftMonth,
-  daysAgoText, periodStart, serviceReport, customersReport, clientSummary, staffReport
+  daysAgoText, periodStart, serviceReport, customersReport, clientSummary, staffReport, expenseBreakdown
 } from "./util.js";
 import { receiptLines, drawReceipt, canvasToFile, shareOrDownload } from "./receipt.js";
 import { buildBackup } from "./backup.js";
 
-const APP_VERSION = "4.2.0";
+const APP_VERSION = "4.3.0";
 const BG_LOCK_MS = 2 * 60 * 1000; // owner app locks again after 2 minutes in the background
 const IDLE_LOCK_MS = 10 * 60 * 1000; // shop tablet locks after 10 minutes without use
 const UNDO_SECONDS = 30;
@@ -60,6 +60,7 @@ let monthUnsub = null;
 let profileUnsub = null;
 let reportUnsub = null;
 let periodUnsub = null;
+let prevUnsub = null;
 const isShop = () => state.role === "shop";
 
 const cur = () => state.stack[state.stack.length - 1];
@@ -190,6 +191,8 @@ function stopData() {
   watching = null;
   if (reportUnsub) { reportUnsub(); reportUnsub = null; }
   if (periodUnsub) { periodUnsub(); periodUnsub = null; }
+  if (prevUnsub) { prevUnsub(); prevUnsub = null; }
+  state.prevKey = null; state.prevTxns = [];
   state.periodKey = null; state.periodTxns = [];
   Object.assign(state, {
     categories: [], lists: [], clients: [], suppliers: [], txns: [], profileTxns: [],
@@ -1239,9 +1242,15 @@ function openSale(clientId = null) {
   });
 }
 
+// A client's balance without the entry being edited (so editing doesn't count it twice).
+function effBalance(d, clientId) {
+  const e = d.editing;
+  return liveBalance(clientId) - (e && e.clientId === clientId ? e.balanceDelta : 0);
+}
+
 function saleNumbers(d) {
   const total = itemsTotal(d.items);
-  const bal = d.client ? liveBalance(d.client.id) : 0;
+  const bal = d.client ? effBalance(d, d.client.id) : 0;
   const { advanceUsed, collect } = saleSplit(total, bal);
   const paidNow = d.payMode === "full" ? collect : Math.min(toRupees(d.partPaid), collect);
   return { total, bal, advanceUsed, collect, paidNow };
@@ -1272,7 +1281,7 @@ function renderSale() {
   const n = saleNumbers(d);
   const canSave = d.client && d.items.length && n.total > 0 && (n.paidNow === 0 || d.methodId);
   $app.innerHTML = `
-  ${topbar("New sale")}
+  ${topbar(d.editing ? "Edit sale" : "New sale")}
   <div class="entry">
     <section class="block">
       <h2>1. Client</h2>
@@ -1298,7 +1307,7 @@ function renderSale() {
   </div>
   <footer class="savebar">
     <div class="sum"><span class="muted small">Total${n.total && n.paidNow !== n.total ? ` · paid now ${formatRs(n.paidNow)}` : ""}</span><strong>${formatRs(n.total)}</strong></div>
-    <button class="btn primary" data-act="save-sale" ${canSave ? "" : "disabled"}>Save sale</button>
+    <button class="btn primary" data-act="save-sale" ${canSave ? "" : "disabled"}>${d.editing ? "Save changes" : "Save sale"}</button>
   </footer>`;
   bindDateAndNote();
   bindClientSection();
@@ -1308,7 +1317,6 @@ function saveSale() {
   const d = D();
   const n = saleNumbers(d);
   if (!d.client || !d.items.length || n.total <= 0) return;
-  const ref = doc(collection(db, "transactions"));
   const balanceDelta = n.total - n.paidNow;
   const data = {
     kind: "sale",
@@ -1325,10 +1333,7 @@ function saveSale() {
     receiptNo: receiptNo(d.date),
     ...baseTxn()
   };
-  const batch = writeBatch(db);
-  batch.set(ref, data);
-  if (balanceDelta) batch.update(doc(db, "clients", d.client.id), { balance: increment(balanceDelta) });
-  batch.commit().catch(onWriteError);
+  const id = commitEntry(d, data, { coll: "clients", id: d.client.id, field: "balance", delta: balanceDelta });
   d.items.forEach((it) => { bumpUsage(it.categoryId); bumpUsage(it.subCategoryId); });
   const prices = store.get("lastPrice", {});
   d.items.forEach((it) => { prices[it.subCategoryId || it.categoryId] = toRupees(it.price); });
@@ -1336,7 +1341,7 @@ function saveSale() {
   if (n.paidNow > 0) store.set("lastMethod", d.methodId);
   rememberClient(d.client.id);
   const due = n.total - n.paidNow - n.advanceUsed;
-  finishEntry({ id: ref.id, ...data }, `Sale saved: ${formatRs(n.total)}${due > 0 ? ` (${formatRs(due)} due)` : ""}`);
+  finishEntry({ id, ...data }, `Sale saved: ${formatRs(n.total)}${due > 0 ? ` (${formatRs(due)} due)` : ""}`, d);
 }
 
 /* ---------- new expense ---------- */
@@ -1384,7 +1389,7 @@ function renderExpense() {
   const paidNow = d.payMode === "full" ? amt : Math.min(toRupees(d.partPaid), amt);
   const canSave = catOk && amt > 0 && (paidNow === 0 || d.methodId) && (d.payMode === "full" || d.supplierId);
   $app.innerHTML = `
-  ${topbar("New expense")}
+  ${topbar(d.editing ? "Edit expense" : "New expense")}
   <div class="entry">
     <section class="block">
       <h2>1. What was it for?</h2>
@@ -1410,7 +1415,7 @@ function renderExpense() {
   </div>
   <footer class="savebar">
     <div class="sum"><span class="muted small">Expense${amt && paidNow !== amt ? ` · paid now ${formatRs(paidNow)}` : ""}</span><strong class="expense-text">− ${formatRs(amt)}</strong></div>
-    <button class="btn primary" data-act="save-expense" ${canSave ? "" : "disabled"}>Save expense</button>
+    <button class="btn primary" data-act="save-expense" ${canSave ? "" : "disabled"}>${d.editing ? "Save changes" : "Save expense"}</button>
   </footer>`;
   bindDateAndNote();
   const pad = $app.querySelector(".numpad");
@@ -1451,7 +1456,6 @@ function saveExpense() {
   const main = catById(d.main);
   const sub = d.sub ? catById(d.sub) : null;
   const sup = d.supplierId ? supplierById(d.supplierId) : null;
-  const ref = doc(collection(db, "transactions"));
   const balanceDelta = amt - paidNow;
   const data = {
     kind: "expense",
@@ -1466,13 +1470,10 @@ function saveExpense() {
     note: d.note.trim(),
     ...baseTxn()
   };
-  const batch = writeBatch(db);
-  batch.set(ref, data);
-  if (d.supplierId && balanceDelta) batch.update(doc(db, "suppliers", d.supplierId), { balanceOwed: increment(balanceDelta) });
-  batch.commit().catch(onWriteError);
+  const id = commitEntry(d, data, d.supplierId ? { coll: "suppliers", id: d.supplierId, field: "balanceOwed", delta: balanceDelta } : null);
   bumpUsage(d.main); bumpUsage(d.sub);
   if (paidNow > 0) store.set("lastMethod", d.methodId);
-  finishEntry({ id: ref.id, ...data }, `Expense saved: ${formatRs(amt)}${balanceDelta ? ` (${formatRs(balanceDelta)} on credit)` : ""}`);
+  finishEntry({ id, ...data }, `Expense saved: ${formatRs(amt)}${balanceDelta ? ` (${formatRs(balanceDelta)} on credit)` : ""}`, d);
 }
 
 /* ---------- receive payment (from a client) ---------- */
@@ -1490,7 +1491,7 @@ function renderPayment() {
   const d = D();
   if (!d.methodId) d.methodId = defaultMethodId();
   const amt = toRupees(d.amount || 0);
-  const bal = d.client ? liveBalance(d.client.id) : 0;
+  const bal = d.client ? effBalance(d, d.client.id) : 0;
   let effect = "";
   if (d.client && amt > 0) {
     if (bal <= 0) effect = `${formatRs(amt)} will be kept as an advance for ${d.client.name}.`;
@@ -1500,7 +1501,7 @@ function renderPayment() {
   }
   const canSave = d.client && amt > 0 && d.methodId;
   $app.innerHTML = `
-  ${topbar("Receive payment")}
+  ${topbar(d.editing ? "Edit payment" : "Receive payment")}
   <div class="entry">
     <section class="block">
       <h2>1. From which client?</h2>
@@ -1519,7 +1520,7 @@ function renderPayment() {
   </div>
   <footer class="savebar">
     <div class="sum"><span class="muted small">Received</span><strong class="transfer-text">${formatRs(amt)}</strong></div>
-    <button class="btn primary" data-act="save-payment" ${canSave ? "" : "disabled"}>Save payment</button>
+    <button class="btn primary" data-act="save-payment" ${canSave ? "" : "disabled"}>${d.editing ? "Save changes" : "Save payment"}</button>
   </footer>`;
   bindDateAndNote();
   bindClientSection();
@@ -1530,20 +1531,16 @@ function savePayment() {
   const d = D();
   const amt = toRupees(d.amount || 0);
   if (!d.client || amt <= 0 || !d.methodId) return;
-  const ref = doc(collection(db, "transactions"));
   const data = {
     kind: "clientPayment", clientId: d.client.id, clientName: d.client.name,
     total: amt, paidNow: amt, balanceDelta: -amt,
     date: d.date, paymentMethodId: d.methodId, note: d.note.trim(),
     receiptNo: receiptNo(d.date), ...baseTxn()
   };
-  const batch = writeBatch(db);
-  batch.set(ref, data);
-  batch.update(doc(db, "clients", d.client.id), { balance: increment(-amt) });
-  batch.commit().catch(onWriteError);
+  const id = commitEntry(d, data, { coll: "clients", id: d.client.id, field: "balance", delta: -amt });
   store.set("lastMethod", d.methodId);
   rememberClient(d.client.id);
-  finishEntry({ id: ref.id, ...data }, `Payment saved: ${formatRs(amt)} from ${d.client.name}`);
+  finishEntry({ id, ...data }, `Payment saved: ${formatRs(amt)} from ${d.client.name}`, d);
 }
 
 /* ---------- pay supplier ---------- */
@@ -1558,11 +1555,11 @@ function renderSupplierPay() {
   if (!d.methodId) d.methodId = defaultMethodId();
   const list = state.suppliers.filter((s) => s.active !== false);
   const s = d.supplierId ? supplierById(d.supplierId) : null;
-  const owed = s ? toRupees(s.balanceOwed) : 0;
+  const owed = s ? toRupees(s.balanceOwed) - (d.editing && d.editing.supplierId === s.id ? d.editing.balanceDelta : 0) : 0;
   const amt = toRupees(d.amount || 0);
   const canSave = s && amt > 0 && d.methodId;
   $app.innerHTML = `
-  ${topbar("Pay supplier")}
+  ${topbar(d.editing ? "Edit supplier payment" : "Pay supplier")}
   <div class="entry">
     <section class="block">
       <h2>1. Which supplier?</h2>
@@ -1583,7 +1580,7 @@ function renderSupplierPay() {
   </div>
   <footer class="savebar">
     <div class="sum"><span class="muted small">Paying</span><strong>${formatRs(amt)}</strong></div>
-    <button class="btn primary" data-act="save-supplier-pay" ${canSave ? "" : "disabled"}>Save payment</button>
+    <button class="btn primary" data-act="save-supplier-pay" ${canSave ? "" : "disabled"}>${d.editing ? "Save changes" : "Save payment"}</button>
   </footer>`;
   bindDateAndNote();
   bindNumpad($app.querySelector(".numpad"), d.amount, (v) => {
@@ -1599,18 +1596,14 @@ function saveSupplierPay() {
   const s = supplierById(d.supplierId);
   const amt = toRupees(d.amount || 0);
   if (!s || amt <= 0 || !d.methodId) return;
-  const ref = doc(collection(db, "transactions"));
   const data = {
     kind: "supplierPayment", supplierId: s.id, supplierName: s.name,
     total: amt, paidNow: amt, balanceDelta: -amt,
     date: d.date, paymentMethodId: d.methodId, note: d.note.trim(), ...baseTxn()
   };
-  const batch = writeBatch(db);
-  batch.set(ref, data);
-  batch.update(doc(db, "suppliers", s.id), { balanceOwed: increment(-amt) });
-  batch.commit().catch(onWriteError);
+  const id = commitEntry(d, data, { coll: "suppliers", id: s.id, field: "balanceOwed", delta: -amt });
   store.set("lastMethod", d.methodId);
-  finishEntry({ id: ref.id, ...data }, `Paid ${s.name}: ${formatRs(amt)}`);
+  finishEntry({ id, ...data }, `Paid ${s.name}: ${formatRs(amt)}`, d);
 }
 
 /* ---------- after saving: undo + receipt ---------- */
@@ -1627,7 +1620,47 @@ function deleteTxn(t) {
   batch.commit().catch(onWriteError);
 }
 
-function finishEntry(txn, message) {
+// Saves a new entry, or the changes to an edited one, together with the balance change
+// on the client or supplier. When editing, the old entry's effect is undone first.
+function commitEntry(d, data, target) {
+  const batch = writeBatch(db);
+  const adj = new Map();
+  const add = (coll, id, field, amt) => {
+    if (!id || !amt) return;
+    const exists = coll === "clients" ? clientById(id) : supplierById(id);
+    if (!exists) return;
+    const k = `${coll}/${id}`;
+    const e = adj.get(k) || { coll, id, field, amt: 0 };
+    e.amt += amt;
+    adj.set(k, e);
+  };
+  let id;
+  if (d.editing) {
+    const old = d.editing;
+    id = old.id;
+    const { createdAt, createdByUser, createdByStaff, createdByStaffName, receiptNo: _r, ...rest } = data;
+    batch.update(doc(db, "transactions", id), { ...rest, editedAt: serverTimestamp(), editedBy: state.user?.email || null });
+    if (old.clientId && (old.kind === "sale" || old.kind === "clientPayment")) add("clients", old.clientId, "balance", -old.balanceDelta);
+    if (old.supplierId && (old.kind === "expense" || old.kind === "supplierPayment")) add("suppliers", old.supplierId, "balanceOwed", -old.balanceDelta);
+  } else {
+    const ref = doc(collection(db, "transactions"));
+    id = ref.id;
+    batch.set(ref, data);
+  }
+  if (target) add(target.coll, target.id, target.field, target.delta);
+  for (const e of adj.values()) if (e.amt) batch.update(doc(db, e.coll, e.id), { [e.field]: increment(e.amt) });
+  batch.commit().catch(onWriteError);
+  return id;
+}
+
+function finishEntry(txn, message, d = null) {
+  if (d?.editing) {
+    goBack();
+    const t = { ...txn, receiptNo: d.editing.receiptNo || txn.receiptNo };
+    const actions = (t.kind === "sale" || t.kind === "clientPayment") ? [{ label: "Receipt", fn: () => openReceipt(t) }] : [];
+    toast("Changes saved." + (navigator.onLine ? "" : " (will sync when online)"), { ms: 8000, actions });
+    return;
+  }
   goBack();
   const extra = navigator.onLine ? "" : " (will sync when online)";
   const actions = [{ label: "Undo", fn: () => { deleteTxn(txn); toast("Entry removed."); } }];
@@ -1805,7 +1838,9 @@ function openTxnSheet(id) {
       <div><dt>Entered by</dt><dd>${t.createdByStaffName ? `${esc(t.createdByStaffName)} <span class="muted small">(shop tablet)</span>` : "Owner"}</dd></div>
       <div><dt>Status</dt><dd>${t._pending ? "Saved on this device, waiting to sync" : "Synced"}</dd></div>
     </dl>
+    ${t.editedAt ? `<p class="muted small">Edited${t.editedBy ? ` by ${esc(t.editedBy)}` : ""}.</p>` : ""}
     <div class="row-btns">
+      ${isShop() ? "" : `<button class="btn ghost" data-act="edit-txn" data-id="${esc(t.id)}">Edit</button>`}
       <button class="btn ghost danger" data-act="delete-txn" data-id="${esc(t.id)}">Delete entry</button>
       ${t.kind === "sale" || t.kind === "clientPayment" ? `<button class="btn ghost" data-act="txn-receipt" data-id="${esc(t.id)}">Receipt</button>` : ""}
       <button class="btn primary" data-act="close-sheet">Close</button>
@@ -2220,7 +2255,21 @@ function openStaffSheet(x = null) {
 /* ---------- reports (owner) ---------- */
 function reportKey() { return state.ui.reportMonth || localDateStr().slice(0, 7); }
 
+// The month before the report month, for "compared with last month".
+function subscribePrev() {
+  const key = shiftMonth(reportKey(), -1);
+  if (state.prevKey === key && prevUnsub) return;
+  if (prevUnsub) prevUnsub();
+  state.prevKey = key;
+  state.prevTxns = [];
+  prevUnsub = onSnapshot(query(collection(db, "transactions"), where("date", ">=", `${key}-01`), where("date", "<=", `${key}-31`)), (snap) => {
+    state.prevTxns = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    if (cur().view === "reports") render();
+  }, onLoadError);
+}
+
 function subscribeReport() {
+  if (state.ui.reportTab === "pl") subscribePrev();
   const key = reportKey();
   if (key === localDateStr().slice(0, 7)) {
     if (reportUnsub) { reportUnsub(); reportUnsub = null; }
@@ -2272,6 +2321,7 @@ function renderReports() {
         <div class="row profit ${r.profit < 0 ? "neg" : "pos"}"><dt>Profit</dt><dd>${r.profit < 0 ? "− " : ""}${formatRs(r.profit)}</dd></div>
       </dl>
     </article>
+    ${expenseSection(key)}
     <section>
       <h2 class="section-title">Day by day</h2>
       ${state.reportLoading && !isCurrent ? `<p class="muted">Loading…</p>` : r.rows.length ? `
@@ -2671,6 +2721,7 @@ Object.assign(actions, {
   "report-tab": (el) => {
     state.ui.reportTab = el.dataset.tab;
     if (["services", "customers"].includes(state.ui.reportTab)) subscribePeriod();
+    if (state.ui.reportTab === "pl") subscribePrev();
     render(); window.scrollTo(0, 0);
   },
   "report-period": (el) => { state.ui.period = el.dataset.id; subscribePeriod(); render(); },
@@ -2757,6 +2808,106 @@ function renderStaffReportDetail() {
 
 Object.assign(actions, {
   "staff-report": (el) => go("staffReport", { id: el.dataset.id })
+});
+
+
+/* ---------- edit an existing entry (owner) ---------- */
+function openEdit(t) {
+  closeSheet();
+  const editing = {
+    id: t.id, kind: t.kind, clientId: t.clientId || null, supplierId: t.supplierId || null,
+    balanceDelta: toRupees(t.balanceDelta || 0), receiptNo: t.receiptNo || null
+  };
+  const base = { editing, date: t.date, note: t.note || "", methodId: t.paymentMethodId || defaultMethodId() };
+  const clientOf = () => {
+    const c = clientById(t.clientId);
+    return { id: t.clientId, name: c?.name || t.clientName || "Client", phone: c?.phone || "" };
+  };
+  if (t.kind === "sale") {
+    const collectOld = toRupees(t.total) - toRupees(t.advanceUsed || 0);
+    go("sale", {}, {
+      type: "sale", client: clientOf(), search: "", newClient: null,
+      items: (t.items || []).map((i) => ({ ...i })), main: null,
+      payMode: toRupees(t.paidNow) >= collectOld ? "full" : "part", partPaid: toRupees(t.paidNow), ...base
+    });
+  } else if (t.kind === "expense") {
+    go("expense", {}, {
+      type: "expense", main: t.categoryId || null, sub: t.subCategoryId || null, amount: String(toRupees(t.total)),
+      supplierId: t.supplierId || null, newSupplier: null,
+      payMode: toRupees(t.paidNow) >= toRupees(t.total) ? "full" : "part", partPaid: toRupees(t.paidNow), ...base
+    });
+  } else if (t.kind === "clientPayment") {
+    go("payment", {}, { type: "payment", client: clientOf(), search: "", newClient: null, amount: String(toRupees(t.total)), ...base });
+  } else if (t.kind === "supplierPayment") {
+    go("supplierPay", {}, { type: "supplierPay", supplierId: t.supplierId, amount: String(toRupees(t.total)), ...base });
+  }
+}
+
+Object.assign(actions, {
+  "edit-txn": (el) => { const t = findTxn(el.dataset.id); if (t) openEdit(t); }
+});
+
+
+/* ---------- where the money went (expense breakdown, owner) ---------- */
+function catName(id) { return catById(id)?.name || "Other"; }
+
+function changeText(now, prev, prevMonth) {
+  if (!prev && !now) return "";
+  if (!prev) return `new this month`;
+  const diff = now - prev;
+  if (!diff) return `same as ${prevMonth}`;
+  const pct = Math.round((Math.abs(diff) / prev) * 100);
+  return `${diff > 0 ? "▲" : "▼"} ${formatRs(Math.abs(diff))} (${pct}%) vs ${prevMonth}`;
+}
+
+function expenseSection(key) {
+  const isCurrent = key === localDateStr().slice(0, 7);
+  if (state.reportLoading && !isCurrent) return "";
+  const r = expenseBreakdown(reportTxnList(), state.prevTxns || [], catName);
+  const prevMonth = monthName(shiftMonth(key, -1) + "-01").split(" ")[0];
+  if (!r.total && !r.prevTotal) return "";
+  const max = Math.max(1, ...r.rows.map((x) => x.amount));
+  return `
+  <section>
+    <h2 class="section-title">Where the money went</h2>
+    <article class="card exp-card">
+      <header class="exp-head">
+        <div><span class="muted small">Expenses this month</span><strong>${formatRs(r.total)}</strong></div>
+        <span class="muted small exp-change">${esc(changeText(r.total, r.prevTotal, prevMonth))}</span>
+      </header>
+      <ul class="exp-list">${r.rows.map((x) => `
+        <li><button class="exp-row" data-act="exp-cat" data-id="${esc(x.id)}">
+          <span class="exp-name"><strong>${esc(x.name)}</strong><span class="muted small">${x.amount ? `${x.share}% · ` : ""}${esc(changeText(x.amount, x.prev, prevMonth))}</span></span>
+          <span class="exp-amt">${formatRs(x.amount)}</span>
+          <span class="exp-bar" aria-hidden="true"><span style="width:${x.amount ? Math.max(2, Math.round((x.amount / max) * 100)) : 0}%"></span></span>
+        </button></li>`).join("")}</ul>
+      <p class="muted small">Tap a group to see its parts and every expense in it.</p>
+    </article>
+  </section>`;
+}
+
+function openExpenseCategory(catId) {
+  const key = reportKey();
+  const r = expenseBreakdown(reportTxnList(), state.prevTxns || [], catName);
+  const row = r.rows.find((x) => x.id === catId);
+  if (!row) return;
+  const list = reportTxnList().filter((t) => t.kind === "expense" && (t.categoryId || "other") === catId).sort(byNewest);
+  const max = Math.max(1, ...row.subs.map((x) => x.amount));
+  openSheet(`
+    <h2>${esc(row.name)}: ${formatRs(row.amount)}</h2>
+    <p class="muted small">${esc(monthName(key + "-01"))}</p>
+    ${row.subs.length ? `<ul class="exp-list">${row.subs.map((x) => `
+      <li class="exp-row static">
+        <span class="exp-name"><strong>${esc(x.name)}</strong><span class="muted small">${x.count} ${x.count === 1 ? "entry" : "entries"}</span></span>
+        <span class="exp-amt">${formatRs(x.amount)}</span>
+        <span class="exp-bar" aria-hidden="true"><span style="width:${Math.max(2, Math.round((x.amount / max) * 100))}%"></span></span>
+      </li>`).join("")}</ul>` : ""}
+    ${list.length ? `<h3 class="section-title small-title">Every expense</h3><ul class="txn-list">${list.map((t) => txnRow(t, { withDate: true })).join("")}</ul>` : `<p class="muted">No expenses in this group this month.</p>`}
+    <div class="row-btns"><button class="btn primary" data-act="close-sheet">Close</button></div>`);
+}
+
+Object.assign(actions, {
+  "exp-cat": (el) => openExpenseCategory(el.dataset.id)
 });
 
 function askPriceAndAdd(mainId, subId) {

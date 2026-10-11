@@ -1,4 +1,4 @@
-# Parlour Accounts (v4.2)
+# Parlour Accounts (v4.3)
 
 Income, expenses and clients for the parlour. A plain HTML/CSS/JS web app that installs
 to the home screen, works offline, and syncs through Firebase.
@@ -116,6 +116,14 @@ Note: the Services and Customers reports read the sales in the chosen period, so
 3. **Reports → Staff:** pick the month; each person's services, customers and revenue, plus "Not set" for
    services with no name. Tap a name: totals per service and every service they did (date, customer, price).
 4. Entry details and the customer report also show who did each service.
+
+## What to test (v4.3: edit entries + where the money went)
+1. **Edit:** tap any entry (Home, a client/supplier history, or a report) → **Edit**. Change client, services,
+   prices, who did it, payment, date or note → **Save changes**. Balances adjust automatically (e.g. a sale
+   edited from Rs 1,500 to Rs 1,200 with Rs 500 paid now owes Rs 700, not more). The entry shows "Edited by …".
+   Owners only; the shop tablet can't edit.
+2. **Where the money went** (Reports → Profit): expenses by group with a bar, share of the month, and the change
+   vs last month. Tap a group: its parts (e.g. Electricity, Gas) and every expense in it (tap one to edit).
 
 ## Free plan limits (checked Oct 2026)
 Firebase's free (Spark) plan: 50,000 reads, 20,000 writes and 20,000 deletes per day, 1 GiB storage.

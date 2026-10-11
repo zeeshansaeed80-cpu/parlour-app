@@ -29,6 +29,8 @@
 | 23 | Service report (v4.1) | Pick service + period (this month / 3 / 6 months / this year): count, revenue, avg price, customers, every occurrence |
 | 25 | Done by (v4.2) | Each service in a sale records the staff member who did it (items[].doneById/doneByName); staff can exist without a tablet PIN |
 | 26 | Staff report (v4.2) | Per month: services, customers, revenue per staff + Not set; detail by service and every service |
+| 27 | Edit entries (v4.3) | Owners edit any entry in place; old balance effect reversed and new applied in one batch; editedAt/editedBy stored |
+| 28 | Expense breakdown (v4.3) | In Profit report: by main category with share and change vs previous month; tap for sub-categories + entries |
 | 24 | Customer report (v4.1) | Per customer, all time: details, totals, services with last done, dated visit history; Call + WhatsApp buttons. Customers list per period. No automatic "due" reminders for now: owner picks manually |
 
 ## Data model (Firestore collections)
@@ -51,6 +53,7 @@
 
 5. **Service & customer reports** (done, v4.1)
 6. **Done by + staff report** (done, v4.2)
+7. **Edit entries + expense breakdown** (done, v4.3)
 
 ## WhatsApp readiness
 In place: international phone format, consent flag + date, tags/area/birthday fields, sales linked to clients.

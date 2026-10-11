@@ -293,3 +293,37 @@ export function staffReport(txns) {
   })).sort((a, b) => (a.id === "none") - (b.id === "none") || b.revenue - a.revenue);
   return { people: list, count, revenue };
 }
+
+// Expenses grouped by main category (and sub-category) for a month, with last month for comparison.
+export function expenseBreakdown(txns, prevTxns, nameOf) {
+  const group = (list) => {
+    const m = new Map();
+    let total = 0;
+    for (const t of list) {
+      if (t.kind !== "expense") continue;
+      const amt = toRupees(t.total);
+      const id = t.categoryId || "other";
+      const g = m.get(id) || { id, amount: 0, count: 0, subs: new Map() };
+      g.amount += amt; g.count++; total += amt;
+      const sid = t.subCategoryId || id;
+      const sub = g.subs.get(sid) || { id: sid, amount: 0, count: 0 };
+      sub.amount += amt; sub.count++;
+      g.subs.set(sid, sub);
+      m.set(id, g);
+    }
+    return { m, total };
+  };
+  const now = group(txns), prev = group(prevTxns);
+  const ids = new Set([...now.m.keys(), ...prev.m.keys()]);
+  const rows = [...ids].map((id) => {
+    const g = now.m.get(id);
+    const amount = g?.amount || 0;
+    return {
+      id, name: nameOf(id), amount, count: g?.count || 0,
+      prev: prev.m.get(id)?.amount || 0,
+      share: now.total ? Math.round((amount / now.total) * 100) : 0,
+      subs: g ? [...g.subs.values()].map((x) => ({ ...x, name: x.id === id ? nameOf(id) : nameOf(x.id) })).sort((a, b) => b.amount - a.amount) : []
+    };
+  }).sort((a, b) => b.amount - a.amount || b.prev - a.prev);
+  return { total: now.total, prevTotal: prev.total, rows };
+}
