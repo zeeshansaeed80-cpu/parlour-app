@@ -31,6 +31,7 @@
 | 26 | Staff report (v4.2) | Per month: services, customers, revenue per staff + Not set; detail by service and every service |
 | 27 | Edit entries (v4.3) | Owners edit any entry in place; old balance effect reversed and new applied in one batch; editedAt/editedBy stored |
 | 28 | Expense breakdown (v4.3) | In Profit report: by main category with share and change vs previous month; tap for sub-categories + entries |
+| 29 | After saving (v4.3.1) | No Undo/Receipt bar: a 3-second message only. New service in a sale starts at Rs 0 with no staff picked. Receipts from entry → Receipt |
 | 24 | Customer report (v4.1) | Per customer, all time: details, totals, services with last done, dated visit history; Call + WhatsApp buttons. Customers list per period. No automatic "due" reminders for now: owner picks manually |
 
 ## Data model (Firestore collections)

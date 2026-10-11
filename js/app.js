@@ -14,10 +14,9 @@ import {
 import { receiptLines, drawReceipt, canvasToFile, shareOrDownload } from "./receipt.js";
 import { buildBackup } from "./backup.js";
 
-const APP_VERSION = "4.3.0";
+const APP_VERSION = "4.3.1";
 const BG_LOCK_MS = 2 * 60 * 1000; // owner app locks again after 2 minutes in the background
 const IDLE_LOCK_MS = 10 * 60 * 1000; // shop tablet locks after 10 minutes without use
-const UNDO_SECONDS = 30;
 
 const $app = document.getElementById("app");
 const $sheet = document.getElementById("sheet-root");
@@ -1653,19 +1652,12 @@ function commitEntry(d, data, target) {
   return id;
 }
 
+// After saving: a short message that goes away by itself. Mistakes are fixed with Edit;
+// receipts are shared by tapping the entry → Receipt.
 function finishEntry(txn, message, d = null) {
-  if (d?.editing) {
-    goBack();
-    const t = { ...txn, receiptNo: d.editing.receiptNo || txn.receiptNo };
-    const actions = (t.kind === "sale" || t.kind === "clientPayment") ? [{ label: "Receipt", fn: () => openReceipt(t) }] : [];
-    toast("Changes saved." + (navigator.onLine ? "" : " (will sync when online)"), { ms: 8000, actions });
-    return;
-  }
   goBack();
   const extra = navigator.onLine ? "" : " (will sync when online)";
-  const actions = [{ label: "Undo", fn: () => { deleteTxn(txn); toast("Entry removed."); } }];
-  if (txn.kind === "sale" || txn.kind === "clientPayment") actions.push({ label: "Receipt", fn: () => openReceipt(txn) });
-  toast(message + extra, { ms: UNDO_SECONDS * 1000, actions });
+  toast((d?.editing ? "Changes saved." : message) + extra, { ms: 3000 });
 }
 
 async function openReceipt(t) {
@@ -1761,11 +1753,6 @@ document.addEventListener("keydown", (e) => {
 });
 
 function activeStaff() { return state.staffList.filter((x) => x.active !== false).sort(byName); }
-function defaultDoneBy() {
-  if (isShop() && state.staff) return state.staff.id;
-  const last = store.get("lastDoneBy", null);
-  return activeStaff().some((x) => x.id === last) ? last : null;
-}
 
 function openPriceSheet({ title, initial, doneLabel, onDone, allowZero = false, max = null, doneBy }) {
   const staff = doneBy !== undefined ? activeStaff() : [];
@@ -2914,9 +2901,8 @@ function askPriceAndAdd(mainId, subId) {
   const main = catById(mainId);
   const sub = subId ? catById(subId) : null;
   const name = sub ? sub.name : main?.name;
-  const last = store.get("lastPrice", {})[subId || mainId];
   openPriceSheet({
-    title: `${name}: price`, initial: last || "", doneLabel: "Add service", doneBy: defaultDoneBy(),
+    title: `${name}: price`, initial: "", doneLabel: "Add service", doneBy: null,
     onDone: (price, staffId) => {
       const it = { categoryId: mainId, subCategoryId: subId, name, price };
       setDoneBy(it, staffId);
