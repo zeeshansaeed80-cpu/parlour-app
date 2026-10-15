@@ -1,14 +1,21 @@
-/* Parlour Accounts — styles (Stage 3) */
+/* Zeeshina Saloon accounts — styles (v4.6) */
+/* Brand: Zeeshina Saloon. Black and silver from the logo. */
+@font-face {
+  font-family: "Cinzel"; font-weight: 700; font-style: normal; font-display: swap;
+  src: url("cinzel-700.woff2") format("woff2");
+}
 :root {
-  --bg: #faf7f4;
+  --bg: #f3f4f5;
   --surface: #ffffff;
-  --surface-2: #f3eee9;
-  --ink: #1f1a1d;
-  --muted: #6b6168;
-  --line: #e4dcd5;
-  --plum: #6b2d5c;
+  --surface-2: #e9ecee;
+  --ink: #121516;
+  --muted: #5d656b;
+  --line: #d9dee1;
+  --plum: #15191b;            /* main accent: logo black */
   --plum-ink: #ffffff;
-  --plum-soft: #f3e6ef;
+  --plum-soft: #e4e8ea;
+  --silver: linear-gradient(90deg, #a9b1b5 0%, #e3e7e8 50%, #a9b1b5 100%);
+  --noir: #040606;            /* logo background */
   --income: #0f6e66;
   --income-soft: #e2f3f1;
   --expense: #b23c17;
@@ -17,22 +24,23 @@
   --warn-soft: #fff2d9;
   --radius: 14px;
   --tap: 48px;
-  --shadow: 0 1px 2px rgba(31, 26, 29, .06), 0 4px 16px rgba(31, 26, 29, .06);
+  --shadow: 0 1px 2px rgba(10, 14, 16, .06), 0 4px 16px rgba(10, 14, 16, .06);
+  --brand-font: "Cinzel", "Trajan Pro", Georgia, serif;
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #161214;
-    --surface: #211b1f;
-    --surface-2: #2b2428;
-    --ink: #f3eef1;
-    --muted: #b3a8ae;
-    --line: #3a3136;
-    --plum: #c98ab8;
-    --plum-ink: #1b1218;
-    --plum-soft: #3a2533;
+    --bg: #040606;
+    --surface: #101415;
+    --surface-2: #1a1f21;
+    --ink: #eceff0;
+    --muted: #9ca5aa;
+    --line: #283033;
+    --plum: #c7cdcf;          /* main accent: logo silver */
+    --plum-ink: #040606;
+    --plum-soft: #222a2d;
     --income: #5fd0c3;
-    --income-soft: #17312e;
+    --income-soft: #13302c;
     --expense: #ff9a78;
     --expense-soft: #3a211a;
     --warn: #ffc670;
@@ -86,7 +94,8 @@ button:disabled { cursor: not-allowed; opacity: .45; }
   font-weight: 600;
   background: var(--surface-2);
 }
-.btn.primary { background: var(--plum); color: var(--plum-ink); }
+.btn.primary { background: var(--plum); color: var(--plum-ink); letter-spacing: .02em; }
+@media (prefers-color-scheme: dark) { .btn.primary { background: var(--silver); } }
 .btn.ghost { background: transparent; border-color: var(--line); }
 .btn.danger { color: var(--expense); border-color: currentColor; }
 .btn.block { width: 100%; }
@@ -106,7 +115,8 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 }
 .topbar.sub { position: sticky; top: 0; z-index: 5; background: var(--bg); }
 .topbar.sub h1 { flex: 1; text-align: center; }
-.eyebrow { margin: 0 0 2px; color: var(--plum); font-weight: 700; font-size: .8rem; letter-spacing: .06em; text-transform: uppercase; }
+.eyebrow { margin: 0 0 2px; color: var(--muted); font-family: var(--brand-font); font-weight: 700; font-size: .78rem; letter-spacing: .14em; text-transform: uppercase; }
+.topbar h1, .lock h1 { font-family: var(--brand-font); font-weight: 700; letter-spacing: .03em; }
 .banner {
   display: flex; align-items: center; gap: 10px;
   padding: 10px 14px; border-radius: 12px; margin-bottom: 12px; font-size: .92rem;
@@ -116,9 +126,19 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .banner.sync { background: var(--plum-soft); color: var(--plum); }
 
 /* ---------- login ---------- */
-.login { max-width: 380px; margin: 0 auto; padding-top: 12vh; text-align: center; }
+.login { max-width: 400px; margin: 0 auto; padding-top: calc(4vh + env(safe-area-inset-top)); text-align: center; }
 .login .stack { text-align: left; margin-top: 24px; }
-.login-logo { border-radius: 18px; margin-bottom: 12px; }
+.brand-hero {
+  background: var(--noir); border-radius: 22px; padding: 22px 16px 18px; margin-bottom: 18px;
+  border: 1px solid #1d2326; box-shadow: 0 10px 30px rgba(4, 6, 6, .25);
+}
+.brand-hero img { display: block; width: min(240px, 62vw); height: auto; margin: 0 auto; }
+.login h1 { font-family: var(--brand-font); font-size: 1.05rem; letter-spacing: .14em; text-transform: uppercase; color: var(--muted); }
+.brand-hero.small { padding: 16px; margin-bottom: 4px; width: 100%; max-width: 320px; }
+.brand-hero.small img { width: min(170px, 46vw); }
+.brand-row { display: flex; align-items: center; gap: 12px; }
+.brand-mark { border-radius: 12px; flex: none; border: 1px solid #262d30; }
+.login-logo { border-radius: 18px; margin-bottom: 4px; border: 1px solid #262d30; }
 .field { display: block; }
 .field > span { display: block; font-weight: 600; font-size: .9rem; margin-bottom: 6px; }
 .field input, .search, .phone-row input {
@@ -141,12 +161,13 @@ button:disabled { cursor: not-allowed; opacity: .45; }
   display: flex; align-items: center; justify-content: center; gap: 10px;
 }
 .big-sign { font-size: 1.8rem; line-height: 1; }
-.big.income { background: var(--income); color: #fff; }
+.big.income { background: var(--plum); color: var(--plum-ink); box-shadow: inset 0 0 0 1px rgba(199, 205, 207, .25); }
 .big.soft { background: var(--surface); color: var(--ink); border: 1.5px solid var(--line); min-height: 64px; font-size: 1rem; }
 .big.soft .big-sign { font-size: 1.3rem; color: var(--plum); }
-.big.expense { background: var(--expense); color: #fff; }
+.big.expense { background: var(--surface); color: var(--ink); border: 1.5px solid var(--line); }
+.big.expense .big-sign { color: var(--expense); }
 @media (prefers-color-scheme: dark) {
-  .big.income, .big.expense { color: #141012; }
+  .big.income { background: var(--silver); }
 }
 .totals-grid { display: grid; gap: 12px; }
 .card {
@@ -317,13 +338,13 @@ body.has-savebar #toast-root { bottom: calc(96px + env(safe-area-inset-bottom));
   pointer-events: auto;
   display: flex; align-items: center; gap: 14px;
   max-width: 560px; padding: 10px 10px 10px 16px;
-  background: #241c21; color: #fff; border-radius: 14px;
+  background: #15191b; color: #eceff0; border-radius: 14px; border: 1px solid #2c3437;
   box-shadow: 0 8px 24px rgba(0, 0, 0, .25);
 }
 .toast.error { background: #7a1f08; }
 .toast-btn {
   min-height: 44px; padding: 6px 16px; border-radius: 10px; border: 0;
-  background: #fff; color: #241c21; font-weight: 700;
+  background: #fff; color: #15191b; font-weight: 700;
 }
 
 /* ===================== Stage 2 ===================== */
@@ -595,7 +616,7 @@ body.sheet-open #toast-root { top: calc(12px + env(safe-area-inset-top)); bottom
 .chip.att-present.on { background: var(--income); border-color: var(--income); color: #fff; }
 .chip.att-absent.on { background: var(--expense); border-color: var(--expense); color: #fff; }
 .chip.att-leave.on { background: var(--warn); border-color: var(--warn); color: #fff; }
-@media (prefers-color-scheme: dark) { .chip.att-present.on, .chip.att-absent.on, .chip.att-leave.on { color: #141012; } }
+@media (prefers-color-scheme: dark) { .chip.att-present.on, .chip.att-absent.on, .chip.att-leave.on { color: #040606; } }
 .att-times { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
 .att-times label { display: inline-flex; align-items: center; gap: 8px; font-weight: 600; }
 .att-times input, .hol-form input {

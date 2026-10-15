@@ -12,10 +12,11 @@ import {
   daysAgoText, periodStart, serviceReport, customersReport, clientSummary, staffReport, expenseBreakdown, describeChanges,
   minutesBetween, hoursText, timeText, scheduleFor, dayInfo, monthDates, attendanceMonth, DEFAULT_SCHEDULE
 } from "./util.js";
-import { receiptLines, drawReceipt, canvasToFile, shareOrDownload } from "./receipt.js";
+import { receiptLines, drawReceipt, loadReceiptLogo, canvasToFile, shareOrDownload } from "./receipt.js";
 import { buildBackup } from "./backup.js";
 
-const APP_VERSION = "4.5.0";
+const APP_VERSION = "4.6.0";
+const BRAND = "Zeeshina Saloon";
 const BG_LOCK_MS = 2 * 60 * 1000; // owner app locks again after 2 minutes in the background
 const IDLE_LOCK_MS = 10 * 60 * 1000; // shop tablet locks after 10 minutes without use
 
@@ -388,8 +389,8 @@ function renderLogin(errorText = "") {
   document.body.classList.remove("has-savebar", "has-tabbar");
   $app.innerHTML = `
   <section class="login">
-    <img src="icons/icon-192.png" alt="" class="login-logo" width="72" height="72">
-    <h1>Parlour Accounts</h1>
+    <div class="brand-hero"><img src="icons/logo.svg" alt="Zeeshina Saloon by Hina Zeeshan" width="474" height="600"></div>
+    <h1>Accounts</h1>
     <p class="muted">Sign in with the owner account.</p>
     <form id="login-form" class="stack" novalidate>
       <label class="field"><span>Email</span>
@@ -549,9 +550,10 @@ function renderHome() {
   const todays = state.txns.filter((t) => t.date === today).sort((a, b) => createdMs(b) - createdMs(a));
   $app.innerHTML = `
   <header class="topbar">
-    <div>
-      <p class="eyebrow">${esc(state.business.name || "Parlour Accounts")}</p>
-      <h1>${esc(niceDate(today, true))}</h1>
+    <div class="brand-row">
+      <img src="icons/icon-192.png" alt="" class="brand-mark" width="44" height="44">
+      <div><p class="eyebrow">${esc(state.business.name || BRAND)}</p>
+      <h1>${esc(niceDate(today, true))}</h1></div>
     </div>
   </header>
   ${statusBanner()}
@@ -944,7 +946,7 @@ function renderSettings() {
   const row = (act, title, sub, extra = "") => `
     <button class="set-row" data-act="${act}" ${extra}><span><strong>${esc(title)}</strong><span class="muted small">${esc(sub)}</span></span><span class="chev" aria-hidden="true">›</span></button>`;
   $app.innerHTML = `
-  <header class="topbar"><div><p class="eyebrow">Parlour Accounts</p><h1>Settings</h1></div></header>
+  <header class="topbar"><div><p class="eyebrow">${BRAND}</p><h1>Settings</h1></div></header>
   <div class="settings">
     <section class="card set-group">
       ${row("open-business", "Business details", state.business.name ? `${state.business.name} · shown on receipts` : "Name, phone and address for receipts")}
@@ -1687,10 +1689,9 @@ async function openReceipt(t) {
     business: state.business, txn: t, methodName: methodName(t.paymentMethodId),
     clientPhone: client?.phone || "", clientBalance: client ? toRupees(client.balance) : null
   });
-  const canvas = drawReceipt(lines);
+  const canvas = drawReceipt(lines, await loadReceiptLogo());
   openSheet(`
     <h2>Receipt</h2>
-    ${!state.business.name ? `<p class="info warn small">Tip: add your parlour's name in <strong>Settings → Business details</strong> so it shows at the top.</p>` : ""}
     <img class="receipt-img" alt="Receipt preview" src="${canvas.toDataURL("image/png")}">
     <div class="row-btns">
       <button class="btn ghost" data-act="close-sheet">Close</button>
@@ -2143,7 +2144,7 @@ function renderStaffLock() {
   if (!picked) {
     $app.innerHTML = `
     <section class="lock">
-      <p class="eyebrow">${esc(state.business.name || "Parlour Accounts")}</p>
+      <div class="brand-hero small"><img src="icons/logo.svg" alt="Zeeshina Saloon by Hina Zeeshan" width="474" height="600"></div>
       <h1>Who's using the tablet?</h1>
       ${staff.length ? `<div class="staff-grid">${staff.map((x) => `
         <button class="staff-btn" data-act="lock-pick" data-id="${esc(x.id)}">
@@ -2215,7 +2216,8 @@ document.addEventListener("visibilitychange", () => {
 function renderStaffHome() {
   $app.innerHTML = `
   <header class="topbar">
-    <div><p class="eyebrow">${esc(state.business.name || "Parlour Accounts")}</p><h1>Hi ${esc(state.staff?.name || "")}</h1></div>
+    <div class="brand-row"><img src="icons/icon-192.png" alt="" class="brand-mark" width="44" height="44">
+    <div><p class="eyebrow">${esc(state.business.name || BRAND)}</p><h1>Hi ${esc(state.staff?.name || "")}</h1></div></div>
     <button class="btn ghost" data-act="lock">Lock</button>
   </header>
   ${!state.online ? `<div class="banner offline"><span class="dot"></span>Offline. Entries are saved on this tablet and will sync when the internet is back.</div>` : ""}
@@ -2437,7 +2439,7 @@ function renderOwnerLock() {
   $app.innerHTML = `
   <section class="lock">
     <img src="icons/icon-192.png" alt="" class="login-logo" width="64" height="64">
-    <p class="eyebrow">${esc(state.business.name || "Parlour Accounts")}</p>
+    <p class="eyebrow">${esc(state.business.name || BRAND)}</p>
     <h1>Enter your app PIN</h1>
     <div class="pin-dots" aria-label="${ownerPin.digits.length} of 4 digits entered">${[0, 1, 2, 3].map((i) => `<span class="${i < ownerPin.digits.length ? "on" : ""}"></span>`).join("")}</div>
     <p class="error" role="alert">${esc(waiting ? "Too many wrong tries. Wait 30 seconds." : ownerPin.error)}</p>

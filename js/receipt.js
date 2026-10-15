@@ -49,23 +49,47 @@ export function receiptLines({ business = {}, txn, methodName = "", clientPhone 
 
 const H = { title: 44, center: 26, heading: 40, pair: 30, item: 30, total: 40, rule: 22, gap: 14, small: 26 };
 
-export function drawReceipt(lines) {
-  const height = PAD * 2 + lines.reduce((s, l) => s + H[l.t], 0);
+// The salon logo (silver on black) for the top of the receipt. Loaded once; null if it can't load.
+let logoPromise = null;
+export function loadReceiptLogo(src = "icons/logo.svg") {
+  if (!logoPromise) logoPromise = new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => { logoPromise = null; resolve(null); };
+    img.src = src;
+  });
+  return logoPromise;
+}
+
+const LOGO_W = 150;     // logo width on the receipt (CSS pixels)
+
+export function drawReceipt(lines, logo = null) {
+  // With the logo, the business name is already in the artwork, so the text title is left out.
+  if (logo && lines[0]?.t === "title") lines = lines.slice(1);
+  const logoH = logo ? Math.round(LOGO_W * (logo.naturalHeight || logo.height) / (logo.naturalWidth || logo.width)) : 0;
+  const band = logo ? logoH + 44 : 6;
+  const height = band + PAD * 2 + lines.reduce((s, l) => s + H[l.t], 0);
   const c = document.createElement("canvas");
   c.width = W * SCALE; c.height = height * SCALE;
   const g = c.getContext("2d");
   g.scale(SCALE, SCALE);
   g.fillStyle = "#ffffff"; g.fillRect(0, 0, W, height);
-  g.fillStyle = "#6b2d5c"; g.fillRect(0, 0, W, 6);
-  let y = PAD;
-  const ink = "#1f1a1d", muted = "#6b6168";
+  g.fillStyle = "#040606"; g.fillRect(0, 0, W, band);
+  if (logo) {
+    g.drawImage(logo, (W - LOGO_W) / 2, 22, LOGO_W, logoH);
+    const sil = g.createLinearGradient(0, 0, W, 0);
+    sil.addColorStop(0, "#8f989c"); sil.addColorStop(.5, "#e3e7e8"); sil.addColorStop(1, "#8f989c");
+    g.fillStyle = sil; g.fillRect(0, band, W, 3);
+  }
+  let y = band + PAD;
+  const ink = "#121516", muted = "#5d656b";
   const right = (txt, yy) => { g.textAlign = "right"; g.fillText(txt, W - PAD, yy); g.textAlign = "left"; };
   const fit = (txt, max) => { let s = String(txt); while (s.length > 3 && g.measureText(s).width > max) s = s.slice(0, -2); return s === String(txt) ? s : s + "…"; };
   for (const l of lines) {
     const h = H[l.t];
     const base = y + h * 0.68;
     g.textBaseline = "alphabetic";
-    if (l.t === "title") { g.font = `700 28px ${FONT}`; g.fillStyle = "#6b2d5c"; g.textAlign = "center"; g.fillText(fit(l.text, W - PAD * 2), W / 2, base); g.textAlign = "left"; }
+    if (l.t === "title") { g.font = `700 28px ${FONT}`; g.fillStyle = "#15191b"; g.textAlign = "center"; g.fillText(fit(l.text, W - PAD * 2), W / 2, base); g.textAlign = "left"; }
     else if (l.t === "center") { g.font = `400 16px ${FONT}`; g.fillStyle = muted; g.textAlign = "center"; g.fillText(fit(l.text, W - PAD * 2), W / 2, base); g.textAlign = "left"; }
     else if (l.t === "heading") { g.font = `700 15px ${FONT}`; g.fillStyle = muted; g.fillText(l.text.split("").join(String.fromCharCode(8202)), PAD, base); }
     else if (l.t === "pair" || l.t === "item") {
@@ -74,7 +98,7 @@ export function drawReceipt(lines) {
       g.font = `${l.strong || l.t === "item" ? 600 : 400} 17px ${FONT}`; g.fillStyle = ink; right(fit(l.right, W * 0.4), base);
     }
     else if (l.t === "total") { g.font = `700 21px ${FONT}`; g.fillStyle = ink; g.fillText(l.left, PAD, base); right(l.right, base); }
-    else if (l.t === "rule") { g.strokeStyle = "#d9cfc7"; g.setLineDash([4, 4]); g.beginPath(); g.moveTo(PAD, y + h / 2); g.lineTo(W - PAD, y + h / 2); g.stroke(); g.setLineDash([]); }
+    else if (l.t === "rule") { g.strokeStyle = "#cfd5d8"; g.setLineDash([4, 4]); g.beginPath(); g.moveTo(PAD, y + h / 2); g.lineTo(W - PAD, y + h / 2); g.stroke(); g.setLineDash([]); }
     else if (l.t === "small") { g.font = `400 15px ${FONT}`; g.fillStyle = muted; g.fillText(fit(l.text, W - PAD * 2), PAD, base); }
     y += h;
   }

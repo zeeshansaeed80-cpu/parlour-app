@@ -34,6 +34,7 @@
 | 29 | After saving (v4.3.1) | No Undo/Receipt bar: a 3-second message only. New service in a sale starts at Rs 0 with no staff picked. Receipts from entry → Receipt |
 | 30 | Staff edits + log (v4.4) | Staff edit only their own entries from today (no delete, no date change); server allows tablet entries < 1 day old with exactly one new editLog line. Every entry shows History: creator (staff or owner email) + each edit (who, when, what changed) |
 | 31 | Attendance (v4.5) | Owner marks Present/Absent/Leave per staff per day (in/out times for Present). Working hours 5–11 PM with dated changes for seasons; weekly off Sunday; shop holidays list. Monthly report: shop working days/hours, per staff present/absent/leave/not marked, hours worked vs expected, calendar. No selfie, no salary deductions. Collections: attendance (id date_staffId), holidays (id date); meta/attendance {schedules[], weeklyOff[]} |
+| 32 | Branding (v4.6) | Zeeshina Saloon logo (silver on black) on sign-in, tablet lock, home bar, receipts and app icons. Black + silver colour scheme in light and dark mode; Cinzel Bold for titles. Sale/expense colours (green/red) kept for amounts |
 | 24 | Customer report (v4.1) | Per customer, all time: details, totals, services with last done, dated visit history; Call + WhatsApp buttons. Customers list per period. No automatic "due" reminders for now: owner picks manually |
 
 ## Data model (Firestore collections)
@@ -59,6 +60,7 @@
 7. **Edit entries + expense breakdown** (done, v4.3)
 8. **Staff edits + history log** (done, v4.4)
 9. **Attendance** (done, v4.5)
+10. **Branding** (done, v4.6)
 
 ## WhatsApp readiness
 In place: international phone format, consent flag + date, tags/area/birthday fields, sales linked to clients.

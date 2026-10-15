@@ -1,6 +1,6 @@
-# Parlour Accounts (v4.5)
+# Zeeshina Saloon accounts (v4.6)
 
-Income, expenses and clients for the parlour. A plain HTML/CSS/JS web app that installs
+Income, expenses, clients and staff for Zeeshina Saloon. A plain HTML/CSS/JS web app that installs
 to the home screen, works offline, and syncs through Firebase.
 
 ## Files
@@ -15,7 +15,8 @@ to the home screen, works offline, and syncs through Firebase.
 | `js/seed.js` | Starting categories and payment methods (written once on first sign-in) |
 | `js/util.js` | Helpers: money, dates, phone numbers, totals |
 | `sw.js` | Keeps a copy of the app on the device so it opens without internet |
-| `manifest.webmanifest`, `icons/` | Lets the app install to the home screen |
+| `manifest.webmanifest`, `icons/` | Lets the app install to the home screen; `icons/logo.svg` is the salon logo |
+| `css/cinzel-700.woff2` | The brand lettering font (Cinzel Bold) |
 | `firestore.rules` | Server-side security rules (paste into the Firebase console) |
 | `SPEC.md` | Decisions log and plan |
 
@@ -145,6 +146,15 @@ Note: the Services and Customers reports read the sales in the chosen period, so
 3. **Reports → Staff → Attendance:** per month, the shop's working days, working hours, holidays and weekly offs;
    per person: present, absent, leave, not marked, and hours worked vs expected. Tap a name: month calendar
    (P/A/L/H/–/?) and every day's times. Tap a day in the calendar to open it.
+
+## What to test (v4.6: Zeeshina Saloon look)
+Upload **all** files again, including the changed `icons/` files and the new `css/cinzel-700.woff2`,
+`icons/logo.svg`, `icons/apple-touch-icon.png` and `icons/favicon-32.png`.
+1. Sign-in screen shows the logo on black; titles use the logo's lettering.
+2. Colours are black and silver (light mode) or silver on black (dark mode, follows the phone setting).
+3. Receipts start with the logo on a black band.
+4. Home-screen icon: remove the old icon and **Add to Home screen** again to get the new one
+   (phones keep the old icon until it's re-added).
 
 ## Free plan limits (checked Oct 2026)
 Firebase's free (Spark) plan: 50,000 reads, 20,000 writes and 20,000 deletes per day, 1 GiB storage.
