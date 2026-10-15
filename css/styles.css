@@ -583,3 +583,46 @@ body.sheet-open #toast-root { top: calc(12px + env(safe-area-inset-top)); bottom
 .log-what { display: block; }
 .log-changes { margin: 2px 0 0; padding-left: 18px; font-size: .85rem; color: var(--muted); }
 .staff-today { margin-top: 18px; }
+
+/* ===================== Attendance ===================== */
+.att-card .att-summary { margin: 0 0 10px; }
+.banner.day-work { background: var(--income-soft); color: var(--income); }
+.banner.day-off { background: var(--surface-2); color: var(--ink); }
+.banner.day-holiday { background: var(--plum-soft); color: var(--plum); }
+.att-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.att-row { display: grid; gap: 10px; padding: 12px 14px; }
+.att-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+.chip.att-present.on { background: var(--income); border-color: var(--income); color: #fff; }
+.chip.att-absent.on { background: var(--expense); border-color: var(--expense); color: #fff; }
+.chip.att-leave.on { background: var(--warn); border-color: var(--warn); color: #fff; }
+@media (prefers-color-scheme: dark) { .chip.att-present.on, .chip.att-absent.on, .chip.att-leave.on { color: #141012; } }
+.att-times { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.att-times label { display: inline-flex; align-items: center; gap: 8px; font-weight: 600; }
+.att-times input, .hol-form input {
+  min-height: 44px; padding: 6px 10px; border-radius: 10px; border: 1.5px solid var(--line); background: var(--surface);
+}
+.att-hours { font-weight: 700; color: var(--income); }
+.hol-form { display: grid; grid-template-columns: auto 1fr auto; gap: 8px; }
+.hol-form .btn { min-height: 44px; }
+@media (max-width: 420px) { .hol-form { grid-template-columns: 1fr 1fr; } .hol-form input[type=text] { grid-column: 1 / -1; grid-row: 2; } }
+.rep-row.cols5 { grid-template-columns: 1.5fr .7fr .7fr .7fr 1.1fr; }
+.cal { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
+.cal-h { text-align: center; font-size: .75rem; font-weight: 700; color: var(--muted); padding: 2px 0; }
+.cal-cell {
+  aspect-ratio: 1 / 1; min-height: 40px; display: grid; place-items: center; align-content: center; gap: 0;
+  border-radius: 8px; border: 1px solid var(--line); background: var(--surface); padding: 0;
+}
+.cal-n { font-size: .7rem; color: var(--muted); }
+.cal-l { font-weight: 800; font-size: .95rem; }
+.cal-cell.p { background: var(--income-soft); border-color: var(--income); }
+.cal-cell.p .cal-l { color: var(--income); }
+.cal-cell.a { background: var(--expense-soft); border-color: var(--expense); }
+.cal-cell.a .cal-l { color: var(--expense); }
+.cal-cell.l { background: var(--warn-soft); border-color: var(--warn); }
+.cal-cell.l .cal-l { color: var(--warn); }
+.cal-cell.h { background: var(--plum-soft); }
+.cal-cell.h .cal-l { color: var(--plum); }
+.cal-cell.o { background: var(--surface-2); }
+.cal-cell.n { border-style: dashed; border-color: var(--warn); }
+.cal-cell.fut { opacity: .55; }
+.cal-legend { margin: 10px 0 0; }

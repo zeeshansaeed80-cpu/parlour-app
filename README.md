@@ -1,4 +1,4 @@
-# Parlour Accounts (v4.4)
+# Parlour Accounts (v4.5)
 
 Income, expenses and clients for the parlour. A plain HTML/CSS/JS web app that installs
 to the home screen, works offline, and syncs through Firebase.
@@ -133,6 +133,18 @@ Note: the Services and Customers reports read the sales in the chosen period, so
 3. Every entry has a **History**: who created it (staff name on the tablet, or the owner's email) and every
    edit, with who made it, when, and what changed (e.g. "Total: Rs 300 → Rs 1,900").
 4. Owners see the same history on their phones and can still edit or delete anything.
+
+## What to test (v4.5: attendance)
+**Publish the new firestore.rules first** (attendance and holidays are owner-only).
+1. **Settings → Attendance settings:** working hours (default 5:00 PM – 11:00 PM). For season timings, set the
+   new hours and the date they start; earlier days keep the old hours. Weekly off day (default Sunday).
+   Holidays: add a date + name (e.g. Eid); remove with ×.
+2. **Home → Attendance card → Mark attendance:** Present / Absent / Leave for each person. Present shows in/out
+   times (start at the working hours; change them for late arrival or early leaving). "Mark everyone present"
+   for normal days. ◀ ▶ moves between days, including future days for planned leave. Tap a status again to clear it.
+3. **Reports → Staff → Attendance:** per month, the shop's working days, working hours, holidays and weekly offs;
+   per person: present, absent, leave, not marked, and hours worked vs expected. Tap a name: month calendar
+   (P/A/L/H/–/?) and every day's times. Tap a day in the calendar to open it.
 
 ## Free plan limits (checked Oct 2026)
 Firebase's free (Spark) plan: 50,000 reads, 20,000 writes and 20,000 deletes per day, 1 GiB storage.

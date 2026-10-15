@@ -1,6 +1,6 @@
 rules_version = '2';
 
-// Security rules (v4.4).
+// Security rules (v4.5).
 // - Owners (emails below) can read and change everything.
 // - The shop tablet login can only do what staff are allowed to do. This is
 //   enforced here on the server, so it can't be bypassed from the tablet.
@@ -92,6 +92,10 @@ service cloud.firestore {
         && request.resource.data.name is string && request.resource.data.name.size() > 0
         && request.resource.data.balanceOwed is int;
     }
+
+    // Attendance and holidays: owners only (the shop tablet can't see or change them).
+    match /attendance/{id} { allow read, write: if isOwner(); }
+    match /holidays/{id}   { allow read, write: if isOwner(); }
 
     match /staff/{id} {
       allow read: if isOwner() || isShop();

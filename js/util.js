@@ -344,3 +344,83 @@ export function describeChanges(oldT, newT, methodNameOf = () => "") {
   if ((oldT.note || "") !== (newT.note || "")) out.push(`Note: "${oldT.note || ""}" → "${newT.note || ""}"`);
   return out;
 }
+
+/* ---------- attendance ---------- */
+export const DEFAULT_SCHEDULE = { from: "2000-01-01", start: "17:00", end: "23:00" };
+
+// Minutes between two "HH:MM" times; a finish earlier than the start counts as after midnight.
+export function minutesBetween(start, end) {
+  if (!/^\d{2}:\d{2}$/.test(start || "") || !/^\d{2}:\d{2}$/.test(end || "")) return 0;
+  const toMin = (t) => Number(t.slice(0, 2)) * 60 + Number(t.slice(3, 5));
+  let m = toMin(end) - toMin(start);
+  if (m < 0) m += 24 * 60;
+  return m;
+}
+export function hoursText(min) {
+  const h = Math.floor(min / 60), m = min % 60;
+  return m ? `${h}h ${m}m` : `${h}h`;
+}
+export function timeText(t) {
+  if (!/^\d{2}:\d{2}$/.test(t || "")) return "";
+  const h = Number(t.slice(0, 2)), m = t.slice(3, 5);
+  return `${((h + 11) % 12) + 1}:${m} ${h < 12 ? "AM" : "PM"}`;
+}
+
+// Working hours that apply on a date (the latest schedule that started on or before it).
+export function scheduleFor(date, settings) {
+  const list = [...(settings?.schedules || [])].sort((a, b) => (a.from < b.from ? -1 : 1));
+  let s = DEFAULT_SCHEDULE;
+  for (const x of list) if (x.from <= date) s = x;
+  return s;
+}
+
+// What kind of day it is for the shop: working, weekly off, or holiday.
+export function dayInfo(date, settings, holidays) {
+  const [y, m, d] = date.split("-").map(Number);
+  const dow = new Date(y, m - 1, d).getDay();
+  const s = scheduleFor(date, settings);
+  const minutes = minutesBetween(s.start, s.end);
+  const offDays = settings?.weeklyOff ?? [0];
+  if (holidays?.[date]) return { type: "holiday", name: holidays[date].name || "Holiday", start: s.start, end: s.end, minutes: 0 };
+  if (offDays.includes(dow)) return { type: "off", name: "Weekly off", start: s.start, end: s.end, minutes: 0 };
+  return { type: "work", name: "Working day", start: s.start, end: s.end, minutes };
+}
+
+export function monthDates(key) {
+  const [y, m] = key.split("-").map(Number);
+  const n = new Date(y, m, 0).getDate();
+  return Array.from({ length: n }, (_, i) => `${key}-${String(i + 1).padStart(2, "0")}`);
+}
+
+// Monthly attendance summary. Counts days up to `today` (so the current month is "so far").
+// records: [{ date, staffId, status: present|absent|leave, in, out }]
+export function attendanceMonth(staff, key, today, settings, holidays, records) {
+  const dates = monthDates(key).filter((d) => d <= today);
+  const byKey = new Map(records.map((r) => [`${r.date}_${r.staffId}`, r]));
+  const shop = { workDays: 0, offDays: 0, holidays: 0, minutes: 0, totalWorkDays: 0 };
+  for (const d of monthDates(key)) if (dayInfo(d, settings, holidays).type === "work") shop.totalWorkDays++;
+  const infos = dates.map((d) => ({ date: d, ...dayInfo(d, settings, holidays) }));
+  for (const i of infos) {
+    if (i.type === "work") { shop.workDays++; shop.minutes += i.minutes; }
+    else if (i.type === "holiday") shop.holidays++;
+    else shop.offDays++;
+  }
+  const people = staff.map((p) => {
+    const r = { id: p.id, name: p.name, present: 0, absent: 0, leave: 0, notMarked: 0, extraDays: 0, minutes: 0, expected: 0, days: [] };
+    for (const i of infos) {
+      const rec = byKey.get(`${i.date}_${p.id}`);
+      const worked = rec?.status === "present" ? minutesBetween(rec.in || i.start, rec.out || i.end) : 0;
+      if (i.type === "work") {
+        if (!rec) r.notMarked++;
+        else if (rec.status === "present") r.present++;
+        else if (rec.status === "absent") r.absent++;
+        else if (rec.status === "leave") r.leave++;
+        if (rec?.status !== "leave") r.expected += i.minutes;
+      } else if (rec?.status === "present") r.extraDays++;
+      r.minutes += worked;
+      r.days.push({ date: i.date, type: i.type, dayName: i.name, status: rec?.status || null, in: rec?.in || "", out: rec?.out || "", note: rec?.note || "", minutes: worked });
+    }
+    return r;
+  });
+  return { shop, people };
+}

@@ -9,12 +9,13 @@ import {
   normalizePhone, prettyPhone, receiptNo, totalsFor, searchClients, itemsTotal,
   clientBalanceText, balanceSummary, saleSplit, byNewest, MONTHS, birthdayText,
   hashPin, newSalt, isValidPin, monthReport, shiftMonth,
-  daysAgoText, periodStart, serviceReport, customersReport, clientSummary, staffReport, expenseBreakdown, describeChanges
+  daysAgoText, periodStart, serviceReport, customersReport, clientSummary, staffReport, expenseBreakdown, describeChanges,
+  minutesBetween, hoursText, timeText, scheduleFor, dayInfo, monthDates, attendanceMonth, DEFAULT_SCHEDULE
 } from "./util.js";
 import { receiptLines, drawReceipt, canvasToFile, shareOrDownload } from "./receipt.js";
 import { buildBackup } from "./backup.js";
 
-const APP_VERSION = "4.4.0";
+const APP_VERSION = "4.5.0";
 const BG_LOCK_MS = 2 * 60 * 1000; // owner app locks again after 2 minutes in the background
 const IDLE_LOCK_MS = 10 * 60 * 1000; // shop tablet locks after 10 minutes without use
 
@@ -23,7 +24,7 @@ const $sheet = document.getElementById("sheet-root");
 const $toast = document.getElementById("toast-root");
 
 const TABS = ["home", "clients", "suppliers", "reports", "settings"];
-const LIVE_VIEWS = new Set(["staffReport", "clientReport", "home", "clients", "suppliers", "reports", "settings", "client", "supplier", "categories", "lists", "staffList", "staffHome"]);
+const LIVE_VIEWS = new Set(["attendance", "attStaff", "attSettings", "staffReport", "clientReport", "home", "clients", "suppliers", "reports", "settings", "client", "supplier", "categories", "lists", "staffList", "staffHome"]);
 const ENTRY_VIEWS = new Set(["sale", "expense", "payment", "supplierPay", "clientForm", "supplierForm", "business"]);
 const PAD_VIEWS = new Set(["expense", "payment", "supplierPay"]);
 
@@ -60,6 +61,7 @@ let profileUnsub = null;
 let reportUnsub = null;
 let periodUnsub = null;
 let prevUnsub = null;
+let attUnsubs = {};
 const isShop = () => state.role === "shop";
 
 const cur = () => state.stack[state.stack.length - 1];
@@ -191,6 +193,9 @@ function stopData() {
   if (reportUnsub) { reportUnsub(); reportUnsub = null; }
   if (periodUnsub) { periodUnsub(); periodUnsub = null; }
   if (prevUnsub) { prevUnsub(); prevUnsub = null; }
+  for (const u of Object.values(attUnsubs)) u();
+  attUnsubs = {};
+  state.attByMonth = {}; state.attSettings = {}; state.holidays = {};
   state.prevKey = null; state.prevTxns = [];
   state.periodKey = null; state.periodTxns = [];
   Object.assign(state, {
@@ -241,6 +246,12 @@ function startData() {
   });
   sub(doc(db, "meta", "business"), (snap) => { state.business = snap.exists() ? snap.data() : {}; dataChanged(); });
   sub(doc(db, "meta", "backup"), (snap) => { state.backupMeta = snap.exists() ? snap.data() : null; dataChanged(); });
+  sub(doc(db, "meta", "attendance"), (snap) => { state.attSettings = snap.exists() ? snap.data() : {}; dataChanged(); });
+  sub(collection(db, "holidays"), (snap) => {
+    state.holidays = Object.fromEntries(snap.docs.map((d) => [d.id, { id: d.id, ...d.data() }]));
+    dataChanged();
+  });
+  subscribeAtt(localDateStr().slice(0, 7));
   subscribeMonth();
 }
 
@@ -353,7 +364,8 @@ function render() {
     sale: renderSale, expense: renderExpense, payment: renderPayment, supplierPay: renderSupplierPay,
     categories: renderCategories, lists: renderLists, business: renderBusiness,
     reports: renderReports, staffList: renderStaffList, staffHome: renderStaffHome, clientReport: renderClientReport,
-    staffReport: renderStaffReportDetail
+    staffReport: renderStaffReportDetail,
+    attendance: renderAttendanceDay, attStaff: renderAttStaff, attSettings: renderAttSettings
   };
   (views[v] || renderHome)();
   if (isTab) $app.insertAdjacentHTML("beforeend", tabbar(v));
@@ -556,6 +568,7 @@ function renderHome() {
       ${totalsCard("Today", day)}
       ${totalsCard("This month", month, monthName(today))}
       ${balancesCard()}
+      ${attendanceCard()}
     </section>
     <section class="today-list">
       <h2 class="section-title">Today's entries <span class="muted small">${todays.length || ""}</span></h2>
@@ -944,6 +957,7 @@ function renderSettings() {
       ${row("open-lock", "App lock (this phone)", getLock() ? "On: asks for your PIN when the app opens" : "Off: anyone holding this phone can open the app")}
     </section>
     <section class="card set-group">
+      ${row("open-att-settings", "Attendance settings", attSettingsSummary())}
       ${row("open-staff", "Staff (shop tablet)", state.staffList.filter((x) => x.active !== false).map((x) => x.name).join(", ") || "No staff yet: add names and PINs")}
     </section>
     <section class="card set-group">
@@ -2316,7 +2330,7 @@ function reportTxnList() {
 function renderReports() {
   if (state.ui.reportTab === "services") return renderServiceReport();
   if (state.ui.reportTab === "customers") return renderCustomersReport();
-  if (state.ui.reportTab === "staff") return renderStaffReportList();
+  if (state.ui.reportTab === "staff") return state.ui.staffMode === "att" ? renderAttReport() : renderStaffReportList();
   const key = reportKey();
   const isCurrent = key === localDateStr().slice(0, 7);
   const r = monthReport(reportTxnList());
@@ -2765,6 +2779,12 @@ function monthNav() {
 }
 const staffNameOf = (id, fallback) => (id === "none" ? "Not set" : (state.staffList.find((x) => x.id === id)?.name || fallback || "Staff"));
 
+function staffModeChips() {
+  const m = state.ui.staffMode || "services";
+  const chip = (id, label) => `<button class="chip small-chip ${m === id ? "on" : ""}" data-act="staff-mode" data-id="${id}" aria-pressed="${m === id}">${label}</button>`;
+  return `<div class="chips" role="group" aria-label="Staff report">${chip("services", "Services done")}${chip("att", "Attendance")}</div>`;
+}
+
 function renderStaffReportList() {
   const isCurrent = reportKey() === localDateStr().slice(0, 7);
   const r = staffReport(reportTxnList());
@@ -2772,6 +2792,7 @@ function renderStaffReportList() {
   $app.innerHTML = `
   ${reportsHeader()}
   <div class="reports">
+    ${staffModeChips()}
     ${monthNav()}
     ${loading ? `<p class="muted">Loading…</p>` : !r.people.length ? `<div class="empty"><p>No services this month.</p></div>` : `
     <div class="card rep-table">
@@ -2962,6 +2983,313 @@ function staffTodayList() {
       : `<p class="muted small">Entries you save today appear here, so you can fix mistakes.</p>`}
   </section>`;
 }
+
+
+/* ---------- attendance (owner marks it) ---------- */
+const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const ATT_LABEL = { present: "Present", absent: "Absent", leave: "Leave" };
+
+function subscribeAtt(key) {
+  if (!state.user || isShop() || attUnsubs[key]) return;
+  state.attByMonth = state.attByMonth || {};
+  attUnsubs[key] = onSnapshot(query(collection(db, "attendance"), where("date", ">=", `${key}-01`), where("date", "<=", `${key}-31`)), (snap) => {
+    state.attByMonth[key] = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    dataChanged();
+  }, onLoadError);
+}
+const attRecords = (key) => (state.attByMonth || {})[key] || [];
+const attSettings = () => state.attSettings || {};
+const holidays = () => state.holidays || {};
+const attStaffList = () => state.staffList.filter((x) => x.active !== false).sort(byName);
+
+function attSettingsSummary() {
+  const s = scheduleFor(localDateStr(), attSettings());
+  const off = (attSettings().weeklyOff ?? [0]).map((d) => WEEKDAYS[d]).join(", ") || "none";
+  return `${timeText(s.start)} – ${timeText(s.end)} · off: ${off} · ${Object.keys(holidays()).length} holidays`;
+}
+
+function dayBanner(info) {
+  if (info.type === "holiday") return `<div class="banner day-holiday"><strong>Holiday:</strong> ${esc(info.name)}</div>`;
+  if (info.type === "off") return `<div class="banner day-off"><strong>Weekly off day.</strong> Mark anyone who worked anyway.</div>`;
+  return `<div class="banner day-work"><strong>Working day</strong> · ${esc(timeText(info.start))} – ${esc(timeText(info.end))} (${hoursText(info.minutes)})</div>`;
+}
+
+function attendanceCard() {
+  const staff = attStaffList();
+  if (!staff.length) return "";
+  const today = localDateStr();
+  const info = dayInfo(today, attSettings(), holidays());
+  const recs = attRecords(today.slice(0, 7)).filter((r) => r.date === today);
+  const count = (st) => recs.filter((r) => r.status === st && staff.some((x) => x.id === r.staffId)).length;
+  const marked = count("present") + count("absent") + count("leave");
+  const text = info.type === "holiday" ? `Holiday today: ${esc(info.name)}`
+    : info.type === "off" ? "Weekly off today"
+    : `${count("present")} present · ${count("absent")} absent · ${count("leave")} on leave${staff.length - marked > 0 ? ` · <span class="warn-text">${staff.length - marked} not marked</span>` : ""}`;
+  return `
+  <article class="card att-card">
+    <header><h2>Attendance</h2><span class="muted small">${esc(info.type === "work" ? `${timeText(info.start)} – ${timeText(info.end)}` : "")}</span></header>
+    <p class="att-summary">${text}</p>
+    <button class="btn ${info.type === "work" && marked < staff.length ? "primary" : "ghost"} block" data-act="open-att" data-date="${today}">${info.type === "work" && marked < staff.length ? "Mark attendance" : "Open attendance"}</button>
+  </article>`;
+}
+
+function renderAttendanceDay() {
+  const date = cur().params.date || localDateStr();
+  subscribeAtt(date.slice(0, 7));
+  const info = dayInfo(date, attSettings(), holidays());
+  const recs = attRecords(date.slice(0, 7)).filter((r) => r.date === date);
+  const recOf = (id) => recs.find((r) => r.staffId === id);
+  const staff = attStaffList();
+  const unmarked = staff.filter((x) => !recOf(x.id));
+  $app.innerHTML = `
+  ${topbar("Attendance")}
+  <div class="reports att-day">
+    <div class="month-nav">
+      <button class="icon-btn" data-act="att-day" data-delta="-1" aria-label="Previous day">◀</button>
+      <strong>${esc(niceDate(date, true))}${date === localDateStr() ? ` <span class="muted small">today</span>` : ""}</strong>
+      <button class="icon-btn" data-act="att-day" data-delta="1" aria-label="Next day">▶</button>
+    </div>
+    ${dayBanner(info)}
+    ${!staff.length ? `<div class="empty"><p>No staff yet. Add them in Settings → Staff.</p></div>` : ""}
+    ${info.type === "work" && unmarked.length ? `<button class="btn primary block" data-act="att-all-present">Mark ${unmarked.length === staff.length ? "everyone" : `the other ${unmarked.length}`} present (${esc(timeText(info.start))} – ${esc(timeText(info.end))})</button>` : ""}
+    <ul class="att-list">${staff.map((x) => {
+      const r = recOf(x.id);
+      const st = r?.status || null;
+      const chip = (status) => `<button class="chip small-chip att-${status} ${st === status ? "on" : ""}" data-act="att-set" data-staff="${esc(x.id)}" data-status="${status}" aria-pressed="${st === status}">${ATT_LABEL[status]}</button>`;
+      const inT = r?.in || info.start, outT = r?.out || info.end;
+      return `
+      <li class="card att-row">
+        <div class="att-head"><strong>${esc(x.name)}</strong><span class="muted small">${st ? esc(ATT_LABEL[st]) : (info.type === "work" ? `<span class="warn-text">Not marked</span>` : "—")}</span></div>
+        <div class="chips">${chip("present")}${chip("absent")}${chip("leave")}</div>
+        ${st === "present" ? `
+        <div class="att-times">
+          <label>In <input type="time" data-att-time="in" data-staff="${esc(x.id)}" value="${esc(inT)}"></label>
+          <label>Out <input type="time" data-att-time="out" data-staff="${esc(x.id)}" value="${esc(outT)}"></label>
+          <span class="att-hours">${hoursText(minutesBetween(inT, outT))}</span>
+        </div>` : ""}
+      </li>`;
+    }).join("")}</ul>
+    <p class="muted small">Tap a status again to clear it. Use ▶ to mark planned leave on future days.</p>
+  </div>`;
+  $app.querySelectorAll("[data-att-time]").forEach((el) => el.addEventListener("change", () => {
+    const sid = el.dataset.staff;
+    const r = recOf(sid);
+    const patch = { in: r?.in || info.start, out: r?.out || info.end };
+    patch[el.dataset.attTime] = el.value || patch[el.dataset.attTime];
+    saveAtt(date, sid, { status: "present", ...patch });
+  }));
+}
+
+function saveAtt(date, staffId, fields) {
+  const x = state.staffList.find((s) => s.id === staffId);
+  setDoc(doc(db, "attendance", `${date}_${staffId}`), {
+    date, staffId, staffName: x?.name || "", ...fields,
+    updatedAt: serverTimestamp(), updatedBy: state.user?.email || null
+  }, { merge: true }).catch(onWriteError);
+}
+
+function renderAttReport() {
+  const key = reportKey();
+  subscribeAtt(key);
+  const today = localDateStr();
+  const r = attendanceMonth(attStaffList(), key, today, attSettings(), holidays(), attRecords(key));
+  const isCurrent = key === today.slice(0, 7);
+  const future = key > today.slice(0, 7);
+  $app.innerHTML = `
+  ${reportsHeader()}
+  <div class="reports">
+    ${staffModeChips()}
+    ${monthNav()}
+    <article class="card stat-card">
+      <div class="stats">
+        <div><span class="muted small">Working days${isCurrent ? " so far" : ""}</span><strong>${r.shop.workDays}${isCurrent ? ` <span class="muted small">of ${r.shop.totalWorkDays}</span>` : ""}</strong></div>
+        <div><span class="muted small">Shop working hours</span><strong>${hoursText(r.shop.minutes)}</strong></div>
+        <div><span class="muted small">Holidays</span><strong>${r.shop.holidays}</strong></div>
+        <div><span class="muted small">Weekly offs</span><strong>${r.shop.offDays}</strong></div>
+      </div>
+    </article>
+    ${future ? `<div class="empty"><p>This month hasn't started yet.</p></div>` : !r.people.length ? `<div class="empty"><p>No staff yet.</p></div>` : `
+    <div class="card rep-table">
+      <div class="rep-row head cols5"><span>Staff</span><span>Present</span><span>Absent</span><span>Leave</span><span>Hours</span></div>
+      ${r.people.map((p) => `
+      <button class="rep-row cols5" data-act="att-staff" data-id="${esc(p.id)}">
+        <span><strong>${esc(p.name)}</strong>${p.notMarked ? `<br><span class="warn-text small">${p.notMarked} not marked</span>` : ""}${p.extraDays ? `<br><span class="muted small">+${p.extraDays} on off days</span>` : ""}</span>
+        <span>${p.present}</span><span>${p.absent}</span><span>${p.leave}</span>
+        <span>${hoursText(p.minutes)}<br><span class="muted small">of ${hoursText(p.expected)}</span></span>
+      </button>`).join("")}
+    </div>
+    <p class="muted small">"Hours" is time worked (from the in/out times) against the shop's working hours on days the person wasn't on leave. Tap a name for their month.</p>`}
+  </div>`;
+}
+
+function renderAttStaff() {
+  const id = cur().params.id;
+  const key = reportKey();
+  subscribeAtt(key);
+  const today = localDateStr();
+  const x = state.staffList.find((s) => s.id === id);
+  const r = attendanceMonth(x ? [x] : [], key, today, attSettings(), holidays(), attRecords(key));
+  const p = r.people[0];
+  if (!p) { $app.innerHTML = `${topbar("Attendance")}<div class="empty"><p>Staff member not found.</p></div>`; return; }
+  const dates = monthDates(key);
+  const [y, m] = key.split("-").map(Number);
+  const lead = (new Date(y, m - 1, 1).getDay() + 6) % 7; // Monday first
+  const dayMap = new Map(p.days.map((d) => [d.date, d]));
+  const cell = (date) => {
+    const d = dayMap.get(date);
+    const info = dayInfo(date, attSettings(), holidays());
+    let cls = "fut", letter = "";
+    if (d) {
+      if (d.status === "present") { cls = "p"; letter = "P"; }
+      else if (d.status === "absent") { cls = "a"; letter = "A"; }
+      else if (d.status === "leave") { cls = "l"; letter = "L"; }
+      else if (d.type === "holiday") { cls = "h"; letter = "H"; }
+      else if (d.type === "off") { cls = "o"; letter = "–"; }
+      else { cls = "n"; letter = "?"; }
+    } else if (info.type === "holiday") { cls = "h fut"; letter = "H"; }
+    else if (info.type === "off") { cls = "o fut"; letter = "–"; }
+    return `<button class="cal-cell ${cls}" data-act="open-att" data-date="${date}" aria-label="${esc(niceDate(date))}: ${esc(letter)}"><span class="cal-n">${Number(date.slice(8))}</span><span class="cal-l">${letter}</span></button>`;
+  };
+  const marked = p.days.filter((d) => d.status || d.type !== "off").reverse();
+  $app.innerHTML = `
+  ${topbar(p.name)}
+  <div class="reports">
+    ${monthNav()}
+    <article class="card stat-card">
+      <div class="stats">
+        <div><span class="muted small">Present</span><strong>${p.present}</strong></div>
+        <div><span class="muted small">Absent</span><strong>${p.absent}</strong></div>
+        <div><span class="muted small">Leave</span><strong>${p.leave}</strong></div>
+        <div><span class="muted small">Hours worked</span><strong>${hoursText(p.minutes)}</strong><span class="muted small">of ${hoursText(p.expected)}</span></div>
+      </div>
+      ${p.notMarked ? `<p class="warn-text small">${p.notMarked} working ${p.notMarked === 1 ? "day" : "days"} not marked yet.</p>` : ""}
+      ${p.extraDays ? `<p class="muted small">Also worked ${p.extraDays} off ${p.extraDays === 1 ? "day" : "days"} (counted in hours).</p>` : ""}
+    </article>
+    <article class="card">
+      <div class="cal">
+        ${["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((d) => `<span class="cal-h">${d}</span>`).join("")}
+        ${"<span></span>".repeat(lead)}${dates.map(cell).join("")}
+      </div>
+      <p class="cal-legend muted small">P present · A absent · L leave · H holiday · – weekly off · ? not marked</p>
+    </article>
+    <section>
+      <h2 class="section-title">Day by day</h2>
+      <div class="card rep-table">
+        <div class="rep-row head cols4"><span>Day</span><span>Status</span><span>In – out</span><span>Hours</span></div>
+        ${marked.map((d) => `
+        <button class="rep-row cols4" data-act="open-att" data-date="${d.date}">
+          <span>${esc(niceDate(d.date))}</span>
+          <span>${d.status ? esc(ATT_LABEL[d.status]) : d.type === "holiday" ? esc(d.dayName) : d.type === "off" ? "Weekly off" : `<span class="warn-text">Not marked</span>`}</span>
+          <span>${d.status === "present" ? `${esc(timeText(d.in))} – ${esc(timeText(d.out))}` : ""}</span>
+          <span>${d.minutes ? hoursText(d.minutes) : ""}</span>
+        </button>`).join("")}
+      </div>
+    </section>
+  </div>`;
+}
+
+function renderAttSettings() {
+  const s = attSettings();
+  const schedules = [...(s.schedules || [])].sort((a, b) => (a.from < b.from ? 1 : -1));
+  const now = scheduleFor(localDateStr(), s);
+  const off = s.weeklyOff ?? [0];
+  const hol = Object.values(holidays()).sort((a, b) => (a.id < b.id ? 1 : -1));
+  $app.innerHTML = `
+  ${topbar("Attendance settings")}
+  <div class="settings">
+    <section class="card set-group">
+      <div class="set-info"><strong>Working hours</strong><span class="muted small">Now: ${esc(timeText(now.start))} – ${esc(timeText(now.end))} (${hoursText(minutesBetween(now.start, now.end))} a day)</span></div>
+      <form id="hours-form" class="stack">
+        <div class="att-times">
+          <label>From <input type="time" id="hs-start" value="${esc(now.start)}"></label>
+          <label>To <input type="time" id="hs-end" value="${esc(now.end)}"></label>
+        </div>
+        <label class="field"><span>Starting from date</span><input type="date" id="hs-from" value="${esc(localDateStr())}"></label>
+        <p class="muted small">For season timings: set the new hours and the date they start. Earlier days keep the old hours in reports.</p>
+        <button type="submit" class="btn primary block">Save working hours</button>
+      </form>
+      ${schedules.length ? `<p class="muted small label">Timing history</p><ul class="cat-subs">${schedules.map((x) => `
+        <li class="cat-item"><span>From ${esc(niceDate(x.from, true))}: ${esc(timeText(x.start))} – ${esc(timeText(x.end))}</span>
+        <button class="icon-btn small" data-act="sched-del" data-from="${esc(x.from)}" aria-label="Remove">×</button></li>`).join("")}</ul>` : ""}
+    </section>
+    <section class="card set-group">
+      <div class="set-info"><strong>Weekly off day</strong><span class="muted small">No one is expected to work on these days.</span></div>
+      <div class="chips">${[1, 2, 3, 4, 5, 6, 0].map((d) => `<button class="chip small-chip ${off.includes(d) ? "on" : ""}" data-act="weekly-off" data-day="${d}" aria-pressed="${off.includes(d)}">${WEEKDAYS[d]}</button>`).join("")}</div>
+    </section>
+    <section class="card set-group">
+      <div class="set-info"><strong>Holidays</strong><span class="muted small">Shop closed for everyone (e.g. Eid). Individual days off: mark "Leave" on the attendance screen.</span></div>
+      <form id="hol-form" class="hol-form">
+        <input type="date" id="hol-date" aria-label="Holiday date" value="${esc(localDateStr())}">
+        <input type="text" id="hol-name" maxlength="40" placeholder="e.g. Eid ul Adha" aria-label="Holiday name">
+        <button type="submit" class="btn primary">Add</button>
+      </form>
+      <p class="error" role="alert" id="hol-err"></p>
+      ${hol.length ? `<ul class="cat-subs">${hol.map((h) => `
+        <li class="cat-item"><span>${esc(niceDate(h.id, true))}: <strong>${esc(h.name)}</strong></span>
+        <button class="icon-btn small" data-act="hol-del" data-id="${esc(h.id)}" aria-label="Remove ${esc(h.name)}">×</button></li>`).join("")}</ul>` : `<p class="muted small">No holidays added.</p>`}
+    </section>
+  </div>`;
+  document.getElementById("hours-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const start = document.getElementById("hs-start").value, end = document.getElementById("hs-end").value;
+    const from = document.getElementById("hs-from").value || localDateStr();
+    if (!start || !end || !minutesBetween(start, end)) { toast("Enter a start and finish time.", { error: true }); return; }
+    const list = (attSettings().schedules || []).filter((x) => x.from !== from);
+    list.push({ from, start, end });
+    setDoc(doc(db, "meta", "attendance"), { schedules: list, weeklyOff: attSettings().weeklyOff ?? [0] }, { merge: true }).catch(onWriteError);
+    toast(`Working hours ${timeText(start)} – ${timeText(end)} from ${niceDate(from)}.`);
+  });
+  document.getElementById("hol-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const date = document.getElementById("hol-date").value;
+    const name = document.getElementById("hol-name").value.trim().replace(/\s+/g, " ");
+    const err = document.getElementById("hol-err");
+    if (!date) { err.textContent = "Pick a date."; return; }
+    if (!name) { err.textContent = "Enter a name for the holiday."; return; }
+    setDoc(doc(db, "holidays", date), { date, name }).catch(onWriteError);
+    toast(`Holiday added: ${name}.`);
+  });
+}
+
+Object.assign(actions, {
+  "open-att": (el) => {
+    if (cur().view === "attendance") { cur().params.date = el.dataset.date; render(); return; }
+    go("attendance", { date: el.dataset.date });
+  },
+  "att-day": (el) => {
+    const [y, m, d] = (cur().params.date || localDateStr()).split("-").map(Number);
+    cur().params.date = localDateStr(new Date(y, m - 1, d + Number(el.dataset.delta)));
+    render();
+  },
+  "att-set": (el) => {
+    const date = cur().params.date;
+    const sid = el.dataset.staff, status = el.dataset.status;
+    const r = attRecords(date.slice(0, 7)).find((x) => x.date === date && x.staffId === sid);
+    if (r?.status === status) { deleteDoc(doc(db, "attendance", `${date}_${sid}`)).catch(onWriteError); return; }
+    const info = dayInfo(date, attSettings(), holidays());
+    saveAtt(date, sid, status === "present" ? { status, in: r?.in || info.start, out: r?.out || info.end } : { status, in: null, out: null });
+  },
+  "att-all-present": () => {
+    const date = cur().params.date;
+    const info = dayInfo(date, attSettings(), holidays());
+    const recs = attRecords(date.slice(0, 7)).filter((x) => x.date === date);
+    for (const x of attStaffList()) if (!recs.some((r) => r.staffId === x.id)) saveAtt(date, x.id, { status: "present", in: info.start, out: info.end });
+  },
+  "att-staff": (el) => go("attStaff", { id: el.dataset.id }),
+  "staff-mode": (el) => { state.ui.staffMode = el.dataset.id; render(); },
+  "open-att-settings": () => go("attSettings"),
+  "weekly-off": (el) => {
+    const d = Number(el.dataset.day);
+    const cur0 = attSettings().weeklyOff ?? [0];
+    const next = cur0.includes(d) ? cur0.filter((x) => x !== d) : [...cur0, d];
+    setDoc(doc(db, "meta", "attendance"), { weeklyOff: next }, { merge: true }).catch(onWriteError);
+  },
+  "sched-del": (el) => {
+    const list = (attSettings().schedules || []).filter((x) => x.from !== el.dataset.from);
+    setDoc(doc(db, "meta", "attendance"), { schedules: list }, { merge: true }).catch(onWriteError);
+  },
+  "hol-del": (el) => twoTap(el, "Tap again", () => { deleteDoc(doc(db, "holidays", el.dataset.id)).catch(onWriteError); })
+});
 
 function askPriceAndAdd(mainId, subId) {
   const main = catById(mainId);
