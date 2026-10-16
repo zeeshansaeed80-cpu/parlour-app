@@ -9,13 +9,13 @@ import {
   normalizePhone, prettyPhone, receiptNo, totalsFor, searchClients, itemsTotal,
   clientBalanceText, balanceSummary, saleSplit, byNewest, MONTHS, birthdayText,
   hashPin, newSalt, isValidPin, monthReport, shiftMonth,
-  daysAgoText, periodStart, serviceReport, customersReport, clientSummary, staffReport, expenseBreakdown, describeChanges,
+  daysAgoText, periodStart, serviceReport, customersReport, clientSummary, staffReport, expenseBreakdown, describeChanges, workersOf,
   minutesBetween, hoursText, timeText, scheduleFor, dayInfo, monthDates, attendanceMonth, DEFAULT_SCHEDULE
 } from "./util.js";
 import { receiptLines, drawReceipt, loadReceiptLogo, canvasToFile, shareOrDownload } from "./receipt.js";
 import { buildBackup } from "./backup.js";
 
-const APP_VERSION = "4.6.0";
+const APP_VERSION = "4.7.0";
 const BRAND = "Zeeshina Saloon";
 const BG_LOCK_MS = 2 * 60 * 1000; // owner app locks again after 2 minutes in the background
 const IDLE_LOCK_MS = 10 * 60 * 1000; // shop tablet locks after 10 minutes without use
@@ -1341,7 +1341,7 @@ function saveSale() {
     clientName: d.client.name,
     items: d.items.map((it) => ({
       categoryId: it.categoryId, subCategoryId: it.subCategoryId, name: it.name, price: toRupees(it.price),
-      doneById: it.doneById || null, doneByName: it.doneByName || null
+      doneBy: workersOf(it), doneById: it.doneById || null, doneByName: it.doneByName || null
     })),
     total: n.total, paidNow: n.paidNow, advanceUsed: n.advanceUsed, balanceDelta,
     date: d.date,
@@ -1777,14 +1777,16 @@ document.addEventListener("keydown", (e) => {
 function activeStaff() { return state.staffList.filter((x) => x.active !== false).sort(byName); }
 
 function openPriceSheet({ title, initial, doneLabel, onDone, allowZero = false, max = null, doneBy }) {
+  // doneBy: list of staff ids who did the service (one or more); undefined hides the "Done by" part.
   const staff = doneBy !== undefined ? activeStaff() : [];
-  let picked = doneBy ?? null;
-  const staffChips = () => `<button class="chip small-chip ${!picked ? "on" : ""}" data-act="sheet-staff" data-id="" aria-pressed="${!picked}">Not set</button>
-    ${staff.map((x) => `<button class="chip small-chip ${picked === x.id ? "on" : ""}" data-act="sheet-staff" data-id="${esc(x.id)}" aria-pressed="${picked === x.id}">${esc(x.name)}</button>`).join("")}`;
+  let picked = [...(doneBy || [])];
+  const staffChips = () => `<button class="chip small-chip ${!picked.length ? "on" : ""}" data-act="sheet-staff" data-id="" aria-pressed="${!picked.length}">Not set</button>
+    ${staff.map((x) => `<button class="chip small-chip ${picked.includes(x.id) ? "on" : ""}" data-act="sheet-staff" data-id="${esc(x.id)}" aria-pressed="${picked.includes(x.id)}">${esc(x.name)}</button>`).join("")}
+    ${picked.length > 1 ? `<p class="muted small shared-note">${picked.length} people: the price is shared equally between them in the staff report.</p>` : ""}`;
   openSheet(`
     <h2>${esc(title)}</h2>
     ${numpadHtml(initial ? String(initial) : "", true)}
-    ${staff.length ? `<p class="muted small label">Done by</p><div class="chips done-by" role="group" aria-label="Done by">${staffChips()}</div>` : ""}
+    ${staff.length ? `<p class="muted small label">Done by${staff.length > 1 ? " (tap everyone who worked on it)" : ""}</p><div class="chips done-by" role="group" aria-label="Done by">${staffChips()}</div>` : ""}
     ${max != null ? `<p class="muted small">Up to ${formatRs(max)}</p>` : ""}
     <div class="row-btns">
       <button class="btn ghost" data-act="close-sheet">Cancel</button>
@@ -1801,7 +1803,9 @@ function openPriceSheet({ title, initial, doneLabel, onDone, allowZero = false, 
     onDone(price, picked);
   };
   sheetHandlers.pickStaff = (id) => {
-    picked = id || null;
+    if (!id) picked = [];
+    else if (picked.includes(id)) picked = picked.filter((x) => x !== id);
+    else picked.push(id);
     const box = $sheet.querySelector(".done-by");
     if (box) box.innerHTML = staffChips();
   };
@@ -2107,8 +2111,8 @@ const actions = {
     const i = Number(el.dataset.i);
     const it = D().items[i];
     openPriceSheet({
-      title: `${it.name}: price`, initial: it.price, doneLabel: "Update", doneBy: it.doneById || null,
-      onDone: (price, staffId) => { it.price = price; setDoneBy(it, staffId); render(); }
+      title: `${it.name}: price`, initial: it.price, doneLabel: "Update", doneBy: workersOf(it).map((w) => w.id),
+      onDone: (price, staffIds) => { it.price = price; setDoneBy(it, staffIds); render(); }
     });
   },
   "sheet-staff": (el) => sheetHandlers.pickStaff?.(el.dataset.id),
@@ -2806,7 +2810,7 @@ function renderStaffReportList() {
       </button>`).join("")}
       <div class="rep-row cols4 total-row"><span><strong>Total</strong></span><span>${r.count}</span><span></span><span><strong>${formatRs(r.revenue)}</strong></span></div>
     </div>
-    <p class="muted small">Each service counts for the person picked in "Done by" when the sale was entered. Tap a name for their month in detail.</p>`}
+    <p class="muted small">Each service counts for the people picked in "Done by" when the sale was entered. A service done by more than one person counts for each of them, and its price is shared equally. Tap a name for their month in detail.</p>`}
   </div>`;
 }
 
@@ -2843,7 +2847,9 @@ function renderStaffReportDetail() {
         ${p.rows.map((x) => `
         <button class="rep-row cols4" data-act="open-txn" data-id="${esc(x.txnId)}">
           <span>${esc(niceDate(x.date))}<br><span class="muted small">${esc(daysAgoText(x.date, today))}</span></span>
-          <span>${esc(clientById(x.clientId)?.name || x.clientName)}</span><span>${esc(x.name)}</span><span>${formatRs(x.price)}</span>
+          <span>${esc(clientById(x.clientId)?.name || x.clientName)}</span>
+          <span>${esc(x.name)}${x.sharedWith?.length ? `<br><span class="muted small">with ${esc(x.sharedWith.join(", "))}</span>` : ""}</span>
+          <span>${formatRs(x.price)}${x.sharedWith?.length ? `<br><span class="muted small">of ${formatRs(x.fullPrice)}</span>` : ""}</span>
         </button>`).join("")}
       </div>
     </section>`}
@@ -3298,21 +3304,27 @@ function askPriceAndAdd(mainId, subId) {
   const sub = subId ? catById(subId) : null;
   const name = sub ? sub.name : main?.name;
   openPriceSheet({
-    title: `${name}: price`, initial: "", doneLabel: "Add service", doneBy: null,
-    onDone: (price, staffId) => {
+    title: `${name}: price`, initial: "", doneLabel: "Add service", doneBy: [],
+    onDone: (price, staffIds) => {
       const it = { categoryId: mainId, subCategoryId: subId, name, price };
-      setDoneBy(it, staffId);
+      setDoneBy(it, staffIds);
       D().items.push(it);
       render();
     }
   });
 }
 
-function setDoneBy(item, staffId) {
-  const x = staffId ? state.staffList.find((s) => s.id === staffId) : null;
-  item.doneById = x?.id || null;
-  item.doneByName = x?.name || null;
-  if (x && !isShop()) store.set("lastDoneBy", x.id);
+// Stores who did a service: the full list (doneBy) plus the first id and all names joined
+// (doneById / doneByName) so older screens and entries keep working.
+function setDoneBy(item, staffIds) {
+  const old = workersOf(item);
+  const people = (staffIds || []).map((id) => {
+    const x = state.staffList.find((s) => s.id === id);
+    return { id, name: x?.name || old.find((w) => w.id === id)?.name || "" };
+  });
+  item.doneBy = people;
+  item.doneById = people[0]?.id || null;
+  item.doneByName = people.length ? people.map((p) => p.name).join(" + ") : null;
 }
 
 document.addEventListener("click", (e) => {

@@ -1,4 +1,4 @@
-# Zeeshina Saloon accounts (v4.6)
+# Zeeshina Saloon accounts (v4.7)
 
 Income, expenses, clients and staff for Zeeshina Saloon. A plain HTML/CSS/JS web app that installs
 to the home screen, works offline, and syncs through Firebase.
@@ -155,6 +155,14 @@ Upload **all** files again, including the changed `icons/` files and the new `cs
 3. Receipts start with the logo on a black band.
 4. Home-screen icon: remove the old icon and **Add to Home screen** again to get the new one
    (phones keep the old icon until it's re-added).
+
+## What to test (v4.7: more than one worker on a service)
+1. New sale → pick a service → under **Done by**, tap every person who worked on it (tap again to remove;
+   **Not set** clears all). The service shows "by Ayesha + Saima".
+2. **Reports → Staff:** the service counts once for each person and the price is split equally
+   (Rs 20,000 by two people = Rs 10,000 each), so the staff total still equals the income.
+   A person's detail shows "with Saima" and "of Rs 20,000" under shared services.
+3. Older entries (one person) keep working as before. No rules change needed.
 
 ## Free plan limits (checked Oct 2026)
 Firebase's free (Spark) plan: 50,000 reads, 20,000 writes and 20,000 deletes per day, 1 GiB storage.

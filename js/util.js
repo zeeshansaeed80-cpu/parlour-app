@@ -267,22 +267,44 @@ export function clientSummary(txns) {
   };
 }
 
+// Who did a sale item, as [{id, name}]. Entries from v4.7 store a doneBy list (one or more people);
+// older entries have a single doneById / doneByName.
+export function workersOf(it) {
+  if (Array.isArray(it?.doneBy) && it.doneBy.length) return it.doneBy.filter((w) => w && w.id).map((w) => ({ id: w.id, name: w.name || "" }));
+  return it?.doneById ? [{ id: it.doneById, name: it.doneByName || "" }] : [];
+}
+
+// Splits a price into n whole-rupee shares that add up exactly (the first people get any extra rupee).
+export function splitShares(price, n) {
+  const total = toRupees(price);
+  if (n <= 1) return [total];
+  const base = Math.floor(total / n), extra = total - base * n;
+  return Array.from({ length: n }, (_, i) => base + (i < extra ? 1 : 0));
+}
+
 // Per staff member: the services they did (from each sale item's "Done by").
+// A service done by several people counts once for each of them, and its price is split equally.
 export function staffReport(txns) {
   const people = new Map();
   let count = 0, revenue = 0;
   for (const t of txns) {
     if (t.kind !== "sale") continue;
     for (const it of t.items || []) {
-      const id = it.doneById || "none";
       const price = toRupees(it.price);
-      const p = people.get(id) || { id, name: it.doneByName || "Not set", count: 0, revenue: 0, clients: new Set(), dates: new Set(), services: new Map(), rows: [] };
-      p.count++; p.revenue += price; p.clients.add(t.clientId); p.dates.add(t.date);
-      const sk = it.subCategoryId || it.categoryId || it.name;
-      const sv = p.services.get(sk) || { name: it.name, times: 0, revenue: 0 };
-      sv.times++; sv.revenue += price; p.services.set(sk, sv);
-      p.rows.push({ txnId: t.id, date: t.date, clientId: t.clientId, clientName: t.clientName, name: it.name, price });
-      people.set(id, p);
+      const found = workersOf(it);
+      const workers = found.length ? found : [{ id: "none", name: "Not set" }];
+      const shares = splitShares(price, workers.length);
+      workers.forEach((w, i) => {
+        const share = shares[i];
+        const p = people.get(w.id) || { id: w.id, name: w.name || "Not set", count: 0, revenue: 0, clients: new Set(), dates: new Set(), services: new Map(), rows: [] };
+        p.count++; p.revenue += share; p.clients.add(t.clientId); p.dates.add(t.date);
+        const sk = it.subCategoryId || it.categoryId || it.name;
+        const sv = p.services.get(sk) || { name: it.name, times: 0, revenue: 0 };
+        sv.times++; sv.revenue += share; p.services.set(sk, sv);
+        const others = workers.filter((o) => o.id !== w.id).map((o) => o.name);
+        p.rows.push({ txnId: t.id, date: t.date, clientId: t.clientId, clientName: t.clientName, name: it.name, price: share, fullPrice: price, sharedWith: others });
+        people.set(w.id, p);
+      });
       count++; revenue += price;
     }
   }

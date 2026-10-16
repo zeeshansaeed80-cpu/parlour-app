@@ -647,3 +647,4 @@ body.sheet-open #toast-root { top: calc(12px + env(safe-area-inset-top)); bottom
 .cal-cell.n { border-style: dashed; border-color: var(--warn); }
 .cal-cell.fut { opacity: .55; }
 .cal-legend { margin: 10px 0 0; }
+.done-by .shared-note { flex-basis: 100%; margin: 2px 0 0; }
